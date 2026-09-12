@@ -3,3 +3,8 @@
 .env.local
 __pycache__/
 *.pyc
+
+# Cache local das ferramentas Expo. Criado ao rodar o app cliente a partir
+# desta pasta; guarda PIDs, portas e dispositivos recentes — específico da
+# máquina, nunca do projeto.
+.expo/
