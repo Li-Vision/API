@@ -1,5 +1,7 @@
 import logging
 import os
+import re
+import unicodedata
 import joblib
 import numpy as np
 import pandas as pd
@@ -13,6 +15,13 @@ from src.core.supabase_client import supabase
 from src.data_collection import holistic_features as hf
 
 logger = logging.getLogger(__name__)
+
+
+def _storage_safe(name: str) -> str:
+    """Remove acentos/caracteres invalidos para uso como chave no Supabase Storage."""
+    ascii_name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", ascii_name).strip("_") or "MODEL"
+
 
 class TrainingService:
     def __init__(self):
@@ -247,7 +256,7 @@ class TrainingService:
             local_path = f"/tmp/models/{model_name}_{model_type}.joblib"
             joblib.dump(clf, local_path)
 
-            storage_path = f"{model_type}/{model_name}_group.joblib"
+            storage_path = f"{model_type}/{_storage_safe(model_name)}_group.joblib"
             with open(local_path, "rb") as f:
                 try:
                     supabase.storage.from_("models").remove([storage_path])
@@ -509,7 +518,7 @@ class TrainingService:
             torch.save(checkpoint, local_path)
 
             # Upload para Supabase Storage (.pt em vez de .joblib)
-            storage_path = f"{model_type}/{model_name}_group.pt"
+            storage_path = f"{model_type}/{_storage_safe(model_name)}_group.pt"
             with open(local_path, "rb") as f:
                 try:
                     supabase.storage.from_("models").remove([storage_path])
@@ -517,7 +526,7 @@ class TrainingService:
                     pass
                 # Remove eventual .joblib antigo tambem
                 try:
-                    supabase.storage.from_("models").remove([f"{model_type}/{model_name}_group.joblib"])
+                    supabase.storage.from_("models").remove([f"{model_type}/{_storage_safe(model_name)}_group.joblib"])
                 except:
                     pass
 
