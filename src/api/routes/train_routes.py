@@ -63,7 +63,7 @@ async def start_training(payload: TrainStartPayload, background_tasks: Backgroun
 
 
 @router.get("/status/by-model/{model_name}")
-async def get_training_status_by_model(model_name: str):
+def get_training_status_by_model(model_name: str):
     """
     Retorna os jobs de treinamento mais recentes para um modelo.
     Util para polling apos iniciar treinamento em background.
@@ -71,61 +71,67 @@ async def get_training_status_by_model(model_name: str):
     from src.core.supabase_client import supabase
     model_name = model_name.upper()
 
-    # Busca IDs dos modelos com esse nome
-    mod_res = supabase.table("models").select("id, type").eq("name", model_name).execute()
-    if not mod_res.data:
-        return {"status": "pending", "jobs": []}
+    try:
+        # Busca IDs dos modelos com esse nome
+        mod_res = supabase.table("models").select("id, type").eq("name", model_name).execute()
+        if not mod_res.data:
+            return {"status": "pending", "jobs": []}
 
-    model_ids = [m["id"] for m in mod_res.data]
-    model_type_map = {m["id"]: m["type"] for m in mod_res.data}
+        model_ids = [m["id"] for m in mod_res.data]
+        model_type_map = {m["id"]: m["type"] for m in mod_res.data}
 
-    # Busca os jobs mais recentes de cada modelo
-    jobs_res = (
-        supabase.table("training_jobs")
-        .select("*")
-        .in_("model_id", model_ids)
-        .order("started_at", desc=True)
-        .limit(10)
-        .execute()
-    )
+        # Busca os jobs mais recentes de cada modelo
+        jobs_res = (
+            supabase.table("training_jobs")
+            .select("*")
+            .in_("model_id", model_ids)
+            .order("started_at", desc=True)
+            .limit(10)
+            .execute()
+        )
 
-    if not jobs_res.data:
-        return {"status": "pending", "jobs": []}
+        if not jobs_res.data:
+            return {"status": "pending", "jobs": []}
 
-    # Pega o job mais recente de cada tipo (static/dynamic)
-    latest_by_type = {}
-    for job in jobs_res.data:
-        mtype = model_type_map.get(job["model_id"], "unknown")
-        if mtype not in latest_by_type:
-            latest_by_type[mtype] = job
+        # Pega o job mais recente de cada tipo (static/dynamic)
+        latest_by_type = {}
+        for job in jobs_res.data:
+            mtype = model_type_map.get(job["model_id"], "unknown")
+            if mtype not in latest_by_type:
+                latest_by_type[mtype] = job
 
-    jobs = []
-    for mtype, job in latest_by_type.items():
-        jobs.append({
-            "job_id": job["id"],
-            "type": mtype,
-            "status": job["status"],
-            "accuracy": job.get("accuracy"),
-            "error": job.get("error"),
-            "progress": job.get("progress", 0),
-            "current_epoch": job.get("current_epoch", 0),
-            "total_epochs": job.get("total_epochs", 0),
-            "stage": job.get("stage", ""),
-        })
+        jobs = []
+        for mtype, job in latest_by_type.items():
+            jobs.append({
+                "job_id": job["id"],
+                "type": mtype,
+                "status": job["status"],
+                "accuracy": job.get("accuracy"),
+                "error": job.get("error"),
+                "progress": job.get("progress", 0),
+                "current_epoch": job.get("current_epoch", 0),
+                "total_epochs": job.get("total_epochs", 0),
+                "stage": job.get("stage", ""),
+            })
 
-    all_done = all(j["status"] in ("completed", "failed") for j in jobs)
-    any_failed = any(j["status"] == "failed" for j in jobs)
+        all_done = all(j["status"] in ("completed", "failed") for j in jobs)
+        any_failed = any(j["status"] == "failed" for j in jobs)
 
-    if all_done:
-        overall = "failed" if any_failed else "completed"
-        overall_progress = 100
-    else:
-        overall = "running"
-        # Media ponderada do progresso dos sub-jobs
-        progress_values = [j.get("progress", 0) or 0 for j in jobs]
-        overall_progress = int(sum(progress_values) / len(progress_values)) if progress_values else 0
+        if all_done:
+            overall = "failed" if any_failed else "completed"
+            overall_progress = 100
+        else:
+            overall = "running"
+            # Media ponderada do progresso dos sub-jobs
+            progress_values = [j.get("progress", 0) or 0 for j in jobs]
+            overall_progress = int(sum(progress_values) / len(progress_values)) if progress_values else 0
 
-    return {"status": overall, "jobs": jobs, "progress": overall_progress}
+        return {"status": overall, "jobs": jobs, "progress": overall_progress}
+    except Exception:
+        # Falha transitoria (ex.: Supabase "Server disconnected"): o treino segue
+        # em background, entao o polling so precisa tentar de novo.
+        logger.exception("[Train] Falha ao consultar status do modelo %s", model_name)
+        return {"status": "running", "jobs": [], "progress": 0, "transient_error": True}
 
 
 @router.get("/status/{job_id}")
