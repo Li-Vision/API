@@ -1,7 +1,10 @@
 name: deploy
 
+# O deploy só roda depois que o workflow "CI" termina com sucesso na main.
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
 
@@ -11,6 +14,7 @@ concurrency:
 
 jobs:
   deploy:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Trigger Render deploy
