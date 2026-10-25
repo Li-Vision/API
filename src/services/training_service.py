@@ -17,6 +17,36 @@ from src.data_collection import holistic_features as hf
 logger = logging.getLogger(__name__)
 
 
+
+def _oversample_minorities(X, y, floor=150, noise=0.02, seed=42):
+    """
+    Repete amostras das classes raras ate' `floor` (ou o tamanho da maior classe,
+    se menor), com ruido gaussiano leve para as copias nao serem identicas.
+    Retorna (X, y) no mesmo tipo recebido (DataFrame/Series).
+    """
+    import numpy as np
+    import pandas as pd
+
+    rng = np.random.default_rng(seed)
+    counts = y.value_counts()
+    target = min(int(counts.max()), floor)
+    sigma = X.std(axis=0).fillna(0.0).to_numpy()
+
+    parts_x, parts_y = [X], [y]
+    for label, n in counts.items():
+        if n >= target:
+            continue
+        idx = rng.choice(np.flatnonzero((y == label).to_numpy()), size=target - n, replace=True)
+        extra = X.iloc[idx].to_numpy(dtype=float)
+        extra = extra + rng.normal(0.0, 1.0, extra.shape) * sigma * noise
+        parts_x.append(pd.DataFrame(extra, columns=X.columns))
+        parts_y.append(pd.Series([label] * len(idx), name=y.name))
+
+    return (
+        pd.concat(parts_x, ignore_index=True),
+        pd.concat(parts_y, ignore_index=True),
+    )
+
 def _storage_safe(name: str) -> str:
     """Remove acentos/caracteres invalidos para uso como chave no Supabase Storage."""
     ascii_name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
@@ -177,6 +207,11 @@ class TrainingService:
             # Como early_stopping era incondicional antes, TODO treino com >= 50
             # amostras falhava. Codificar para inteiro resolve na raiz; o
             # LabelEncoder viaja no joblib para reconstruir as letras depois.
+            # Balanceia SO o treino (o holdout continua com a distribuicao real).
+            # O MLP do sklearn nao tem class_weight: com C=344 e D=6 amostras o
+            # modelo aprendia a "chutar" a letra mais frequente.
+            X_train, y_train = _oversample_minorities(X_train, y_train)
+
             label_encoder = LabelEncoder()
             y_train_enc = label_encoder.fit_transform(y_train)
 
@@ -205,7 +240,7 @@ class TrainingService:
                     alpha=0.001,                     # Regularizacao L2
                     learning_rate='adaptive',        # Reduz LR quando estagna
                     learning_rate_init=0.001,
-                    batch_size=min(64, max(16, n_train // 4)),
+                    batch_size=min(64, max(16, len(X_train) // 4)),
                 )),
             ])
             clf.fit(X_train, y_train_enc)
