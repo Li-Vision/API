@@ -6,7 +6,7 @@
 # PyTorch CPU-only para o modelo GRU dinamico.
 # ===================================================
 
-FROM python:3.11-slim-bookworm
+FROM python:3.15-slim-bookworm
 
 # Instala dependencias do sistema necessarias para:
 # - MediaPipe (libGLESv2, libegl1, libgl1)
