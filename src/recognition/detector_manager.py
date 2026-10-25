@@ -24,6 +24,7 @@ class DetectorManager:
         min_score=0.6,
         stability_frames=3,
         cooldown_frames=10,
+        hold_frames=5,
     ):
         self.detectors = detectors
         self.min_score = min_score
@@ -38,6 +39,20 @@ class DetectorManager:
         # memória do último gesto detectado
         self.last_label = None
         self.last_score = 0.0
+
+        # Frames seguidos sem detecção confiável. Passando de `hold_frames`,
+        # o último gesto é esquecido; sem isso a tela ficava presa na última
+        # letra (A/C) enquanto o modelo não alcançava o limiar de confiança.
+        self.hold_frames = hold_frames
+        self.miss_frames = 0
+
+    def _miss(self):
+        """Registra um frame sem detecção e devolve o gesto ainda retido."""
+        self.miss_frames += 1
+        if self.miss_frames > self.hold_frames:
+            self.last_label = None
+            self.last_score = 0.0
+        return self.last_label, self.last_score
 
     def _is_sequence_detector(self, det) -> bool:
         """
@@ -75,6 +90,8 @@ class DetectorManager:
 
         if not hands:
             self.history.clear()
+            self.last_label = None
+            self.last_score = 0.0
             return None, 0.0
 
         best_label = None
@@ -120,7 +137,9 @@ class DetectorManager:
         # -------------------------------------------
         if best_score < self.min_score:
             self.history.clear()
-            return self.last_label, self.last_score
+            return self._miss()
+
+        self.miss_frames = 0
 
         # -------------------------------------------
         # Estabilização temporal
