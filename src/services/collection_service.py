@@ -62,7 +62,17 @@ class CollectionService:
             # Dataset preexistente manda no formato: misturar dimensões dentro
             # do mesmo dataset inviabiliza o treino.
             existing_schema = self._get_dataset_schema(dataset_id)
-            use_holistic = wants_holistic and existing_schema != hf.SCHEMA_HANDS_V1
+            requested_schema = hf.SCHEMA_HOLISTIC_V1 if wants_holistic else hf.SCHEMA_HANDS_V1
+            if existing_schema and existing_schema != requested_schema:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"O dataset '{dataset_name}' e '{existing_schema}', mas a coleta "
+                        f"atual e '{requested_schema}'. Troque o modo de coleta ou "
+                        "escolha/crie outro dataset."
+                    ),
+                }
+            use_holistic = wants_holistic
 
             if use_holistic:
                 features = hf.build_frame_vector(frame, hf.SCHEMA_HOLISTIC_V1)
@@ -176,7 +186,11 @@ class CollectionService:
         return {"ok": True, "status": "stopped"}
 
     def get_datasets(self) -> dict:
-        res = supabase.table("datasets").select("id, name, type").execute()
+        try:
+            res = supabase.table("datasets").select("id, name, type, feature_schema").execute()
+        except Exception as exc:  # coluna pode não existir (migração pendente)
+            logger.warning("[collect] listagem com feature_schema falhou: %s", exc)
+            res = supabase.table("datasets").select("id, name, type").execute()
         return {"datasets": res.data}
 
     def get_dataset_info(self, dataset_id: str) -> dict:
