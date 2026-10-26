@@ -5,6 +5,7 @@ from typing import Optional
 from src.api.app_state import state
 from src.core.model_cache import ModelCache
 from src.core.supabase_client import supabase
+from src.core.pagination import fetch_all
 from src.api.routes.learning_routes import require_admin
 
 class ModePayload(BaseModel):
@@ -114,16 +115,16 @@ def export_samples():
     """Retorna todas as amostras do banco de dados para backup."""
     try:
         # Busca todas as amostras com label, features e timestamp
-        res = supabase.table("samples").select("id, dataset_id, label, features, created_at").execute()
+        samples = fetch_all(lambda: supabase.table("samples").select("id, dataset_id, label, features, created_at"))
         
         # Busca também os nomes dos datasets para contextualizar o backup
         ds_res = supabase.table("datasets").select("id, name, type").execute()
         
         return {
             "ok": True,
-            "samples_count": len(res.data),
+            "samples_count": len(samples),
             "datasets": ds_res.data,
-            "samples": res.data
+            "samples": samples
         }
     except Exception as e:
         raise HTTPException(500, f"Falha ao exportar dados: {e}")

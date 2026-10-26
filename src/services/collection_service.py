@@ -1,6 +1,7 @@
 import logging
 from typing import Optional, Dict, Any, List
 from src.core.supabase_client import supabase, supabase_admin
+from src.core.pagination import fetch_all
 from src.data_collection.static_collector import StaticCollector
 from src.data_collection import holistic_features as hf
 from src.api.holistic import HolisticFrame
@@ -200,15 +201,15 @@ class CollectionService:
             
         ds = ds_res.data[0]
         
-        samples_res = supabase.table("samples").select("label").eq("dataset_id", dataset_id).execute()
+        samples = fetch_all(lambda: supabase.table("samples").select("label").eq("dataset_id", dataset_id))
         
         label_counts = {}
-        for row in samples_res.data:
+        for row in samples:
             lbl = row["label"]
             label_counts[lbl] = label_counts.get(lbl, 0) + 1
             
         ds["stats"] = label_counts
-        ds["total_samples"] = len(samples_res.data)
+        ds["total_samples"] = len(samples)
         
         return ds
 
@@ -285,9 +286,9 @@ class CollectionService:
 
     def get_ranking(self) -> dict:
         try:
-            res = supabase.table("samples").select("user_id").execute()
+            rows = fetch_all(lambda: supabase.table("samples").select("user_id"))
             counts = {}
-            for row in res.data:
+            for row in rows:
                 uid = row.get("user_id")
                 if uid:
                     counts[uid] = counts.get(uid, 0) + 1
