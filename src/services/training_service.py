@@ -12,6 +12,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from src.core.supabase_client import supabase
+from src.core.pagination import fetch_all
 from src.data_collection import holistic_features as hf
 
 logger = logging.getLogger(__name__)
@@ -129,8 +130,9 @@ class TrainingService:
             # ── Etapa 1: Carregando dados ──────────────────────────────
             self._update_job(job_id, {"progress": 10, "current_epoch": 0, "total_epochs": 0, "stage": "loading_data"})
 
-            samples_res = supabase.table("samples").select("label, features").in_("dataset_id", dataset_ids).execute()
-            data = samples_res.data
+            data = fetch_all(
+                lambda: supabase.table("samples").select("label, features").in_("dataset_id", dataset_ids)
+            )
             
             if len(data) < 2:
                 raise ValueError(f"Amostras insuficientes para treinar modelo {model_type} (minimo 2).")
@@ -362,8 +364,9 @@ class TrainingService:
         job_id = self.create_job(model_id, dataset_name_grouped)
         
         try:
-            samples_res = supabase.table("samples").select("label, features").in_("dataset_id", dataset_ids).execute()
-            data = samples_res.data
+            data = fetch_all(
+                lambda: supabase.table("samples").select("label, features").in_("dataset_id", dataset_ids)
+            )
             
             if len(data) < 2:
                 raise ValueError(f"Amostras insuficientes para treinar modelo {model_type} (minimo 2).")
