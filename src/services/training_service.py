@@ -456,8 +456,12 @@ class TrainingService:
                 idx_train, idx_val = np.arange(len(y_arr)), None
 
             # ── Modelo GRU ──────────────────────────────────────────
+            # hidden_size 64 (era 128): o custo da GRU cresce com o quadrado do
+            # tamanho oculto e, com poucas amostras por gesto, 128 so' aumentava
+            # o tempo e o overfitting. O valor vai no checkpoint, entao a
+            # inferencia reconstroi o modelo com o mesmo tamanho.
             num_classes = len(labels_unique)
-            hidden_size = 128
+            hidden_size = 64
             num_layers = 2
             dropout = 0.3
             bidirectional = True
@@ -475,22 +479,36 @@ class TrainingService:
             X_tensor = torch.from_numpy(X_3d)
             y_tensor = torch.from_numpy(y_arr)
 
-            dataset_torch = TensorDataset(X_tensor, y_tensor)
-            batch_size = min(32, max(4, len(df) // 4))
-            loader = DataLoader(dataset_torch, batch_size=batch_size, shuffle=True)
+            X_tr, y_tr = X_tensor[idx_train], y_tensor[idx_train]
+            n_train = len(idx_train)
+            dataset_torch = TensorDataset(X_tr, y_tr)
+            # Lote maior = menos passos por epoca (cada passo tem custo fixo
+            # alto numa GRU em CPU). drop_last evita um lote final de 1 amostra,
+            # que quebra o BatchNorm em modo treino.
+            batch_size = min(64, max(8, n_train // 8))
+            loader = DataLoader(
+                dataset_torch, batch_size=batch_size, shuffle=True,
+                drop_last=(n_train % batch_size == 1),
+            )
 
             criterion = nn.CrossEntropyLoss()
             optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer, mode='min', factor=0.5, patience=15
+                optimizer, mode='min', factor=0.5, patience=6
             )
 
+            def _val_loss():
+                model.eval()
+                with torch.no_grad():
+                    return criterion(model(X_tensor[idx_val]), y_tensor[idx_val]).item()
+
             # Training loop
-            num_epochs = 300
+            num_epochs = 150
             best_loss = float('inf')
-            patience = 40
+            patience = 15
             patience_counter = 0
             best_state = None
+            t_start = time.time()
 
             # Reporta inicio do treinamento
             self._update_job(job_id, {
@@ -498,8 +516,8 @@ class TrainingService:
                 "stage": "training"
             })
 
-            model.train()
             for epoch in range(num_epochs):
+                model.train()
                 total_loss = 0.0
                 correct = 0
                 total = 0
@@ -519,11 +537,12 @@ class TrainingService:
 
                 avg_loss = total_loss / total
                 acc_epoch = correct / total
-                scheduler.step(avg_loss)
+                monitored = _val_loss() if idx_val is not None else avg_loss
+                scheduler.step(monitored)
 
                 # Early stopping
-                if avg_loss < best_loss - 1e-4:
-                    best_loss = avg_loss
+                if monitored < best_loss - 1e-4:
+                    best_loss = monitored
                     patience_counter = 0
                     best_state = {k: v.clone() for k, v in model.state_dict().items()}
                 else:
@@ -547,26 +566,40 @@ class TrainingService:
                         "stage": "training"
                     })
 
-                if (epoch + 1) % 50 == 0:
-                    logger.info("[Dynamic] Epoch %d/%d - Loss: %.4f - Acc: %.2f%%",
-                                epoch + 1, num_epochs, avg_loss, acc_epoch * 100)
+                if (epoch + 1) % 10 == 0:
+                    logger.info("[Dynamic] Epoch %d/%d - Loss: %.4f - Acc: %.2f%% - %.0fs",
+                                epoch + 1, num_epochs, avg_loss, acc_epoch * 100,
+                                time.time() - t_start)
 
             # Restaura melhor estado
             if best_state:
                 model.load_state_dict(best_state)
+            logger.info("[Dynamic] Treino concluido em %.0fs (%d amostras de treino)",
+                        time.time() - t_start, n_train)
 
             # ── Avaliacao final ─────────────────────────────────────
             model.eval()
+            eval_idx = idx_val if idx_val is not None else idx_train
             with torch.no_grad():
-                all_outputs = model(X_tensor)
-                _, all_preds = all_outputs.max(1)
+                _, all_preds = model(X_tensor[eval_idx]).max(1)
                 all_preds_np = all_preds.numpy()
 
-            y_true_labels = [labels_unique[i] for i in y_arr]
+            y_true_labels = [labels_unique[i] for i in y_arr[eval_idx]]
             y_pred_labels = [labels_unique[i] for i in all_preds_np]
 
             acc = accuracy_score(y_true_labels, y_pred_labels)
-            report = classification_report(y_true_labels, y_pred_labels)
+            report = classification_report(y_true_labels, y_pred_labels, zero_division=0)
+            if idx_val is not None:
+                report = (
+                    f"Avaliado em {len(eval_idx)} amostras de teste "
+                    f"(holdout estratificado; treino: {n_train}).\n\n" + report
+                )
+            else:
+                report = (
+                    "ATENCAO: poucas amostras para separar teste; a acuracia foi medida "
+                    "nos proprios dados de treino e mede memorizacao, nao acerto real.\n\n"
+                    + report
+                )
 
             # ── Salva modelo ────────────────────────────────────────
             os.makedirs("/tmp/models", exist_ok=True)
