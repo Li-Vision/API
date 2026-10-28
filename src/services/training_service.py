@@ -1,9 +1,11 @@
 import logging
 import os
 import re
+import time
 import unicodedata
 import joblib
 import numpy as np
+from threadpoolctl import threadpool_limits
 import pandas as pd
 from typing import Optional, Dict
 from sklearn.neural_network import MLPClassifier
@@ -242,10 +244,20 @@ class TrainingService:
                     alpha=0.001,                     # Regularizacao L2
                     learning_rate='adaptive',        # Reduz LR quando estagna
                     learning_rate_init=0.001,
-                    batch_size=min(64, max(16, len(X_train) // 4)),
+                    batch_size=min(128, max(16, len(X_train) // 4)),
                 )),
             ])
-            clf.fit(X_train, y_train_enc)
+            # Matrizes pequenas (lote de ~100 x 269) nao compensam o custo de
+            # sincronizar dezenas de threads do BLAS: o MLP chegava a rodar ~7x
+            # mais lento so' por isso, e pior onde o container enxerga mais
+            # nucleos do que a cota de CPU que realmente recebe (caso do Render).
+            # Limitar a 2 threads deixou o fit de ~16s em ~1,5s, com a mesma
+            # acuracia, num teste local.
+            t_fit = time.time()
+            with threadpool_limits(limits=2):
+                clf.fit(X_train, y_train_enc)
+            logger.info("[Static] fit em %.1fs (%d iteracoes, %d amostras)",
+                        time.time() - t_fit, clf.named_steps["mlp"].n_iter_, len(X_train))
 
             # Devolve os rotulos originais ao modelo.
             #
@@ -425,6 +437,23 @@ class TrainingService:
             # Reshape para 3D: (n_samples, window_size, features_per_frame)
             X_3d = np.array(features_list, dtype=np.float32).reshape(-1, window_size, features_per_frame)
             y_arr = np.array(y_indices, dtype=np.int64)
+
+            # ── Holdout estratificado ───────────────────────────────
+            # Serve a dois propositos: medir acerto real (antes a acuracia era
+            # calculada sobre os proprios dados de treino) e parar o treino
+            # quando a validacao para de melhorar. Parar pela loss de TREINO
+            # nunca dispara na pratica — ela segue caindo devagar — e o treino
+            # rodava as 300 epocas sempre.
+            counts = np.bincount(y_arr, minlength=len(labels_unique))
+            can_split = bool(len(labels_unique) >= 2 and counts.min() >= 2 and len(y_arr) >= 20)
+            if can_split:
+                test_size = min(0.4, max(0.2, len(labels_unique) / len(y_arr)))
+                idx_train, idx_val = train_test_split(
+                    np.arange(len(y_arr)), test_size=test_size,
+                    random_state=42, stratify=y_arr,
+                )
+            else:
+                idx_train, idx_val = np.arange(len(y_arr)), None
 
             # ── Modelo GRU ──────────────────────────────────────────
             num_classes = len(labels_unique)
