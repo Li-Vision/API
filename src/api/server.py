@@ -19,6 +19,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s [%(name)s] %(messa
 app = FastAPI(title="Li-Vision API")
 
 state.start_pipeline()
+state.training_service.fail_orphaned_jobs()
 # NOTA: Detectores agora são criados por sessão (UserSession).
 # O ModelCache já foi inicializado no AppState.__init__.
 

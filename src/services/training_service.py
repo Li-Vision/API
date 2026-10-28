@@ -73,6 +73,32 @@ class TrainingService:
                 except Exception as e2:
                     logger.error(f"Falha no fallback de update do job {job_id}: {e2}")
 
+    def fail_orphaned_jobs(self) -> int:
+        """
+        Marca como falhos os jobs que ficaram "running" de uma execucao anterior.
+
+        O treino roda numa thread do proprio processo. Se o processo morre no
+        meio (hibernacao do Render, deploy, falta de memoria), o job nunca e'
+        concluido e fica "running" para sempre: o app mostra progresso parado e
+        nao ha' como saber que o treino foi perdido. Ao subir, qualquer job
+        ainda "running" so' pode ser orfao — este processo acabou de nascer.
+        """
+        try:
+            res = supabase.table("training_jobs").update({
+                "status": "failed",
+                "error": ("Treino interrompido: o servidor reiniciou durante o "
+                          "treinamento (hibernacao, deploy ou falta de memoria). "
+                          "Inicie o treino novamente."),
+                "completed_at": "now()",
+            }).eq("status", "running").execute()
+            n = len(res.data or [])
+            if n:
+                logger.warning("[Train] %d job(s) orfao(s) marcados como falhos na inicializacao", n)
+            return n
+        except Exception as e:
+            logger.warning("[Train] Nao foi possivel limpar jobs orfaos: %s", e)
+            return 0
+
     def create_job(self, model_id: str, dataset_name: str) -> str:
         res = supabase.table("training_jobs").insert({
             "model_id": model_id,
