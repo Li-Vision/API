@@ -1,9 +1,11 @@
 import logging
 import os
 import re
+import time
 import unicodedata
 import joblib
 import numpy as np
+from threadpoolctl import threadpool_limits
 import pandas as pd
 from typing import Optional, Dict
 from sklearn.neural_network import MLPClassifier
@@ -70,6 +72,32 @@ class TrainingService:
                     supabase.table("training_jobs").update(basic_updates).eq("id", job_id).execute()
                 except Exception as e2:
                     logger.error(f"Falha no fallback de update do job {job_id}: {e2}")
+
+    def fail_orphaned_jobs(self) -> int:
+        """
+        Marca como falhos os jobs que ficaram "running" de uma execucao anterior.
+
+        O treino roda numa thread do proprio processo. Se o processo morre no
+        meio (hibernacao do Render, deploy, falta de memoria), o job nunca e'
+        concluido e fica "running" para sempre: o app mostra progresso parado e
+        nao ha' como saber que o treino foi perdido. Ao subir, qualquer job
+        ainda "running" so' pode ser orfao — este processo acabou de nascer.
+        """
+        try:
+            res = supabase.table("training_jobs").update({
+                "status": "failed",
+                "error": ("Treino interrompido: o servidor reiniciou durante o "
+                          "treinamento (hibernacao, deploy ou falta de memoria). "
+                          "Inicie o treino novamente."),
+                "completed_at": "now()",
+            }).eq("status", "running").execute()
+            n = len(res.data or [])
+            if n:
+                logger.warning("[Train] %d job(s) orfao(s) marcados como falhos na inicializacao", n)
+            return n
+        except Exception as e:
+            logger.warning("[Train] Nao foi possivel limpar jobs orfaos: %s", e)
+            return 0
 
     def create_job(self, model_id: str, dataset_name: str) -> str:
         res = supabase.table("training_jobs").insert({
@@ -242,10 +270,20 @@ class TrainingService:
                     alpha=0.001,                     # Regularizacao L2
                     learning_rate='adaptive',        # Reduz LR quando estagna
                     learning_rate_init=0.001,
-                    batch_size=min(64, max(16, len(X_train) // 4)),
+                    batch_size=min(128, max(16, len(X_train) // 4)),
                 )),
             ])
-            clf.fit(X_train, y_train_enc)
+            # Matrizes pequenas (lote de ~100 x 269) nao compensam o custo de
+            # sincronizar dezenas de threads do BLAS: o MLP chegava a rodar ~7x
+            # mais lento so' por isso, e pior onde o container enxerga mais
+            # nucleos do que a cota de CPU que realmente recebe (caso do Render).
+            # Limitar a 2 threads deixou o fit de ~16s em ~1,5s, com a mesma
+            # acuracia, num teste local.
+            t_fit = time.time()
+            with threadpool_limits(limits=2):
+                clf.fit(X_train, y_train_enc)
+            logger.info("[Static] fit em %.1fs (%d iteracoes, %d amostras)",
+                        time.time() - t_fit, clf.named_steps["mlp"].n_iter_, len(X_train))
 
             # Devolve os rotulos originais ao modelo.
             #
@@ -426,9 +464,30 @@ class TrainingService:
             X_3d = np.array(features_list, dtype=np.float32).reshape(-1, window_size, features_per_frame)
             y_arr = np.array(y_indices, dtype=np.int64)
 
+            # ── Holdout estratificado ───────────────────────────────
+            # Serve a dois propositos: medir acerto real (antes a acuracia era
+            # calculada sobre os proprios dados de treino) e parar o treino
+            # quando a validacao para de melhorar. Parar pela loss de TREINO
+            # nunca dispara na pratica — ela segue caindo devagar — e o treino
+            # rodava as 300 epocas sempre.
+            counts = np.bincount(y_arr, minlength=len(labels_unique))
+            can_split = bool(len(labels_unique) >= 2 and counts.min() >= 2 and len(y_arr) >= 20)
+            if can_split:
+                test_size = min(0.4, max(0.2, len(labels_unique) / len(y_arr)))
+                idx_train, idx_val = train_test_split(
+                    np.arange(len(y_arr)), test_size=test_size,
+                    random_state=42, stratify=y_arr,
+                )
+            else:
+                idx_train, idx_val = np.arange(len(y_arr)), None
+
             # ── Modelo GRU ──────────────────────────────────────────
+            # hidden_size 64 (era 128): o custo da GRU cresce com o quadrado do
+            # tamanho oculto e, com poucas amostras por gesto, 128 so' aumentava
+            # o tempo e o overfitting. O valor vai no checkpoint, entao a
+            # inferencia reconstroi o modelo com o mesmo tamanho.
             num_classes = len(labels_unique)
-            hidden_size = 128
+            hidden_size = 64
             num_layers = 2
             dropout = 0.3
             bidirectional = True
@@ -446,22 +505,36 @@ class TrainingService:
             X_tensor = torch.from_numpy(X_3d)
             y_tensor = torch.from_numpy(y_arr)
 
-            dataset_torch = TensorDataset(X_tensor, y_tensor)
-            batch_size = min(32, max(4, len(df) // 4))
-            loader = DataLoader(dataset_torch, batch_size=batch_size, shuffle=True)
+            X_tr, y_tr = X_tensor[idx_train], y_tensor[idx_train]
+            n_train = len(idx_train)
+            dataset_torch = TensorDataset(X_tr, y_tr)
+            # Lote maior = menos passos por epoca (cada passo tem custo fixo
+            # alto numa GRU em CPU). drop_last evita um lote final de 1 amostra,
+            # que quebra o BatchNorm em modo treino.
+            batch_size = min(64, max(8, n_train // 8))
+            loader = DataLoader(
+                dataset_torch, batch_size=batch_size, shuffle=True,
+                drop_last=(n_train % batch_size == 1),
+            )
 
             criterion = nn.CrossEntropyLoss()
             optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer, mode='min', factor=0.5, patience=15
+                optimizer, mode='min', factor=0.5, patience=6
             )
 
+            def _val_loss():
+                model.eval()
+                with torch.no_grad():
+                    return criterion(model(X_tensor[idx_val]), y_tensor[idx_val]).item()
+
             # Training loop
-            num_epochs = 300
+            num_epochs = 150
             best_loss = float('inf')
-            patience = 40
+            patience = 15
             patience_counter = 0
             best_state = None
+            t_start = time.time()
 
             # Reporta inicio do treinamento
             self._update_job(job_id, {
@@ -469,8 +542,8 @@ class TrainingService:
                 "stage": "training"
             })
 
-            model.train()
             for epoch in range(num_epochs):
+                model.train()
                 total_loss = 0.0
                 correct = 0
                 total = 0
@@ -490,11 +563,12 @@ class TrainingService:
 
                 avg_loss = total_loss / total
                 acc_epoch = correct / total
-                scheduler.step(avg_loss)
+                monitored = _val_loss() if idx_val is not None else avg_loss
+                scheduler.step(monitored)
 
                 # Early stopping
-                if avg_loss < best_loss - 1e-4:
-                    best_loss = avg_loss
+                if monitored < best_loss - 1e-4:
+                    best_loss = monitored
                     patience_counter = 0
                     best_state = {k: v.clone() for k, v in model.state_dict().items()}
                 else:
@@ -518,26 +592,40 @@ class TrainingService:
                         "stage": "training"
                     })
 
-                if (epoch + 1) % 50 == 0:
-                    logger.info("[Dynamic] Epoch %d/%d - Loss: %.4f - Acc: %.2f%%",
-                                epoch + 1, num_epochs, avg_loss, acc_epoch * 100)
+                if (epoch + 1) % 10 == 0:
+                    logger.info("[Dynamic] Epoch %d/%d - Loss: %.4f - Acc: %.2f%% - %.0fs",
+                                epoch + 1, num_epochs, avg_loss, acc_epoch * 100,
+                                time.time() - t_start)
 
             # Restaura melhor estado
             if best_state:
                 model.load_state_dict(best_state)
+            logger.info("[Dynamic] Treino concluido em %.0fs (%d amostras de treino)",
+                        time.time() - t_start, n_train)
 
             # ── Avaliacao final ─────────────────────────────────────
             model.eval()
+            eval_idx = idx_val if idx_val is not None else idx_train
             with torch.no_grad():
-                all_outputs = model(X_tensor)
-                _, all_preds = all_outputs.max(1)
+                _, all_preds = model(X_tensor[eval_idx]).max(1)
                 all_preds_np = all_preds.numpy()
 
-            y_true_labels = [labels_unique[i] for i in y_arr]
+            y_true_labels = [labels_unique[i] for i in y_arr[eval_idx]]
             y_pred_labels = [labels_unique[i] for i in all_preds_np]
 
             acc = accuracy_score(y_true_labels, y_pred_labels)
-            report = classification_report(y_true_labels, y_pred_labels)
+            report = classification_report(y_true_labels, y_pred_labels, zero_division=0)
+            if idx_val is not None:
+                report = (
+                    f"Avaliado em {len(eval_idx)} amostras de teste "
+                    f"(holdout estratificado; treino: {n_train}).\n\n" + report
+                )
+            else:
+                report = (
+                    "ATENCAO: poucas amostras para separar teste; a acuracia foi medida "
+                    "nos proprios dados de treino e mede memorizacao, nao acerto real.\n\n"
+                    + report
+                )
 
             # ── Salva modelo ────────────────────────────────────────
             os.makedirs("/tmp/models", exist_ok=True)

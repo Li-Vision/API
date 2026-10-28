@@ -90,6 +90,13 @@ async def websocket_detect(websocket: WebSocket):
         while True:
             message = await websocket.receive()
 
+            # receive() devolve (nao lanca) a mensagem de desconexao; sem este
+            # teste o loop chamava receive() de novo e estourava
+            # "Cannot call receive once a disconnect message has been received".
+            if message.get("type") == "websocket.disconnect":
+                print(f"[WS] Cliente desconectou (modo: {session.detection_mode})")
+                break
+
             if "bytes" in message:
                 data = message["bytes"]
                 try:

@@ -2,6 +2,7 @@ import logging
 from typing import Optional, Dict, Any, List
 from src.core.supabase_client import supabase, supabase_admin
 from src.core.pagination import fetch_all
+from src.core.retry import retry_transient
 from src.data_collection.static_collector import StaticCollector
 from src.data_collection import holistic_features as hf
 from src.api.holistic import HolisticFrame
@@ -89,9 +90,9 @@ class CollectionService:
             if user_id:
                 insert_data["user_id"] = user_id
                 
-            supabase.table("samples").insert(insert_data).execute()
+            retry_transient(lambda: supabase.table("samples").insert(insert_data).execute())
             
-            res = supabase.table("samples").select("id", count="exact").eq("dataset_id", dataset_id).eq("label", label).execute()
+            res = retry_transient(lambda: supabase.table("samples").select("id", count="exact").eq("dataset_id", dataset_id).eq("label", label).execute())
             count = res.count if hasattr(res, 'count') and res.count is not None else len(res.data)
             
             return {"ok": True, "sample_count": count}
