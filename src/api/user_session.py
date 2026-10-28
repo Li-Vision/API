@@ -203,12 +203,12 @@ class UserSession:
 
             else:
                 # ── sklearn MLP legado (.joblib) ────────────────
-                det = SequenceGestureDetector.__new__(SequenceGestureDetector)
-                det.model = model
-                det.window_size = window_size
-                det.threshold = threshold
-                det.buffer = deque(maxlen=window_size)
-                detectors.append(det)
+                if not SequenceGestureDetector.is_discriminative(model):
+                    logger.warning("[UserSession] Modelo dinamico '%s' ignorado: tem menos de 2 classes "
+                                   "e dispararia o gesto em qualquer movimento. Treine-o com outros "
+                                   "gestos para poder usa-lo.", name)
+                    continue
+                detectors.append(SequenceGestureDetector.from_model(model, window_size, threshold))
 
                 logger.info("[UserSession] Detector MLP legado criado: '%s'", name)
 

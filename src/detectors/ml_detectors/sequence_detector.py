@@ -9,8 +9,26 @@ from src.data_collection import holistic_features as hf
 class SequenceGestureDetector:
 
     def __init__(self, model_path, window_size, threshold, feature_schema=None):
+        self._setup(joblib.load(model_path), window_size, threshold, feature_schema)
 
-        self.model = joblib.load(model_path)
+    @staticmethod
+    def is_discriminative(model) -> bool:
+        """
+        Um classificador de uma classe só devolve probabilidade 1.0 para qualquer
+        entrada, então dispararia o gesto o tempo todo (e ganharia de todos os
+        outros detectores no DetectorManager). Só serve com 2 classes ou mais.
+        """
+        return len(getattr(model, "classes_", ())) >= 2
+
+    @classmethod
+    def from_model(cls, model, window_size, threshold, feature_schema=None):
+        """Cria o detector a partir de um modelo já carregado (ModelCache), sem reabrir o arquivo."""
+        det = cls.__new__(cls)
+        det._setup(model, window_size, threshold, feature_schema)
+        return det
+
+    def _setup(self, model, window_size, threshold, feature_schema=None):
+        self.model = model
         # Modelos antigos foram treinados com formatos diferentes por frame:
         # 63/126 = xyz relativo sem posicao absoluta; 42/84 = xy normalizado;
         # 65/130 = formato atual com pulso absoluto + xyz relativo (hands_v1);
