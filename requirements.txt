@@ -2,7 +2,7 @@ opencv-python
 mediapipe
 numpy
 pandas
-scikit-learn==1.5.2
+scikit-learn==1.9.1
 joblib
 fastapi
 uvicorn
