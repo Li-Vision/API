@@ -21,6 +21,7 @@ from src.detectors.rule_detectors import (
     RuleDDetector, RuleEDetector,
 )
 from src.services.collection_service import CollectionService
+from src.data_collection import holistic_features as hf
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +194,14 @@ class UserSession:
                 det.model = gru_model
                 det.classes = classes
                 det.input_size = input_size
+                # __new__ pula o __init__: sem isto landmarks_to_vector levanta
+                # AttributeError em todo frame e o DetectorManager engole o erro,
+                # entao nenhum gesto dinamico era reconhecido.
+                det.feature_schema = checkpoint.get("feature_schema") or (
+                    hf.SCHEMA_HOLISTIC_V1
+                    if input_size == hf.frame_size(hf.SCHEMA_HOLISTIC_V1)
+                    else hf.SCHEMA_HANDS_V1
+                )
                 det.window_size = ws
                 det.threshold = threshold
                 det.buffer = deque(maxlen=ws)
