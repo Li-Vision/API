@@ -8,3 +8,6 @@ __pycache__/
 # desta pasta; guarda PIDs, portas e dispositivos recentes — específico da
 # máquina, nunca do projeto.
 .expo/
+
+# Ambiente local de treino (scripts/train_local.py)
+.venv-train/

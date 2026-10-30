@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import tempfile
 import time
 import unicodedata
 import joblib
@@ -18,6 +19,9 @@ from src.core.pagination import fetch_all
 from src.data_collection import holistic_features as hf
 
 logger = logging.getLogger(__name__)
+
+# /tmp no Linux (Render); a pasta temporaria do usuario ao treinar no Windows.
+_MODEL_TMP_DIR = os.path.join(tempfile.gettempdir(), "models")
 
 
 
@@ -58,7 +62,7 @@ def _storage_safe(name: str) -> str:
 
 class TrainingService:
     def __init__(self):
-        os.makedirs("/tmp/models", exist_ok=True)
+        os.makedirs(_MODEL_TMP_DIR, exist_ok=True)
         self.active_jobs = {}
 
     def _update_job(self, job_id: str, updates: dict):
@@ -327,8 +331,8 @@ class TrainingService:
                     f"Colete mais amostras para obter uma medida confiavel.\n\n" + report
                 )
 
-            os.makedirs("/tmp/models", exist_ok=True)
-            local_path = f"/tmp/models/{model_name}_{model_type}.joblib"
+            os.makedirs(_MODEL_TMP_DIR, exist_ok=True)
+            local_path = os.path.join(_MODEL_TMP_DIR, f"{model_name}_{model_type}.joblib")
             joblib.dump(clf, local_path)
 
             storage_path = f"{model_type}/{_storage_safe(model_name)}_group.joblib"
@@ -410,6 +414,24 @@ class TrainingService:
                 raise ValueError(f"Amostras insuficientes para treinar modelo {model_type} (minimo 2).")
 
             df = pd.DataFrame(data)
+
+            # ── Descarta amostras de tamanho diferente ──────────────
+            # Um dataset pode misturar coletas em "so maos" (15 x 130) e
+            # holistico (15 x 269) — o app deixa trocar de modo entre uma
+            # gravacao e outra. np.array() falha em lista de tamanhos
+            # diferentes, entao ficamos com o tamanho mais comum e avisamos
+            # quais labels perderam amostras.
+            lengths = df['features'].map(len)
+            main_len = int(lengths.mode().iloc[0])
+            mismatch = lengths != main_len
+            if mismatch.any():
+                dropped = df.loc[mismatch, 'label'].value_counts().to_dict()
+                logger.warning(
+                    "[Dynamic] %d amostra(s) descartada(s) por ter tamanho diferente de %d "
+                    "(coletadas em outro modo?): %s",
+                    int(mismatch.sum()), main_len, dropped,
+                )
+                df = df.loc[~mismatch].reset_index(drop=True)
 
             # ── Prepara labels ──────────────────────────────────────
             labels_unique = sorted(df['label'].unique().tolist())
@@ -628,8 +650,8 @@ class TrainingService:
                 )
 
             # ── Salva modelo ────────────────────────────────────────
-            os.makedirs("/tmp/models", exist_ok=True)
-            local_path = f"/tmp/models/{model_name}_{model_type}.pt"
+            os.makedirs(_MODEL_TMP_DIR, exist_ok=True)
+            local_path = os.path.join(_MODEL_TMP_DIR, f"{model_name}_{model_type}.pt")
 
             checkpoint = {
                 "model_state_dict": model.state_dict(),
