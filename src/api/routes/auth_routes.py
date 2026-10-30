@@ -66,7 +66,7 @@ async def register(payload: RegisterPayload):
         
         if user_id:
             # Assuma que a primeira pessoa logada não seja necessariamente admin (vamos setar member, e dps o DB root muda dps via banco manual)
-            supabase_admin.table("profiles").insert({
+            supabase_admin.table("profiles").upsert({
                 "id": user_id, 
                 "full_name": payload.full_name,
                 "role": "member"
