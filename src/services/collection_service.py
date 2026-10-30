@@ -135,6 +135,21 @@ class CollectionService:
                 self.dynamic_session["dataset_name"], "dynamic", schema
             )
 
+            # Dataset preexistente manda no formato: misturar "so maos" com
+            # holistico no mesmo dataset gera sequencias de tamanhos diferentes
+            # e inviabiliza o treino (mesma regra da coleta estatica).
+            existing_schema = self._get_dataset_schema(self.dynamic_session["dataset_id"])
+            if existing_schema and existing_schema != schema:
+                self.dynamic_session = None
+                self.dynamic_buffer = []
+                return {
+                    "ok": False,
+                    "error": (
+                        f"O dataset e '{existing_schema}', mas a coleta atual e '{schema}'. "
+                        "Troque o modo (Holistico / So maos) ou escolha outro dataset."
+                    ),
+                }
+
         schema = self.dynamic_session["feature_schema"]
         features = hf.build_frame_vector(frame, schema)
         self.dynamic_buffer.append(features)
