@@ -415,6 +415,24 @@ class TrainingService:
             labels_unique = sorted(df['label'].unique().tolist())
             label_to_idx = {lbl: i for i, lbl in enumerate(labels_unique)}
             y_indices = df['label'].map(label_to_idx).values
+            # ── Descarta amostras de tamanho diferente ──────────────
+            # Um dataset pode misturar coletas em "so maos" (15 x 130) e
+            # holistico (15 x 269) — o app deixa trocar de modo entre uma
+            # gravacao e outra. np.array() falha em lista de tamanhos
+            # diferentes, entao ficamos com o tamanho mais comum e avisamos
+            # quais labels perderam amostras.
+            lengths = df['features'].map(len)
+            main_len = int(lengths.mode().iloc[0])
+            mismatch = lengths != main_len
+            if mismatch.any():
+                dropped = df.loc[mismatch, 'label'].value_counts().to_dict()
+                logger.warning(
+                    "[Dynamic] %d amostra(s) descartada(s) por ter tamanho diferente de %d "
+                    "(coletadas em outro modo?): %s",
+                    int(mismatch.sum()), main_len, dropped,
+                )
+                df = df.loc[~mismatch].reset_index(drop=True)
+
 
             # ── Prepara features como sequencias 3D ─────────────────
             # Cada sample e um vetor flatten de (window_size * features_per_frame)
