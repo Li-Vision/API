@@ -1,0 +1,12 @@
+# Dependencias para treinar localmente (scripts/train_local.py).
+# Mantenha scikit-learn IGUAL ao de requirements.txt: o modelo estatico e' um
+# pickle e precisa carregar no servidor.
+numpy
+pandas
+scikit-learn==1.5.2
+joblib
+threadpoolctl
+torch
+supabase
+python-dotenv
+pyyaml
