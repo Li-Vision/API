@@ -27,4 +27,4 @@ class RuleCDetector(BaseDetector):
         curved_middle = landmarks[12].y > landmarks[10].y
 
         is_c = (self.min_ratio < ratio < self.max_ratio) and curved_index and curved_middle
-        return ("C", float(is_c)) if is_c else (None, 0.0)
+        return ("C", 0.9) if is_c else (None, 0.0)
