@@ -46,6 +46,20 @@ class DetectorManager:
         self.hold_frames = hold_frames
         self.miss_frames = 0
 
+        # Diagnostico do ultimo frame: o que cada detector respondeu e quem
+        # venceu. Alimenta o log de inferencia do app.
+        self.last_trace = []
+        self.last_winner = None
+        self.last_cooldown = False
+
+    def debug_info(self) -> dict:
+        """Resumo serializavel da ultima decisao (para log/diagnostico)."""
+        return {
+            "winner": self.last_winner,
+            "cooldown": self.last_cooldown,
+            "trace": self.last_trace,
+        }
+
     def _miss(self):
         """Registra um frame sem detecção e devolve o gesto ainda retido."""
         self.miss_frames += 1
@@ -80,6 +94,10 @@ class DetectorManager:
         # Detectores de sequência recebem o frame inteiro (mãos + pose + face);
         # detectores estáticos/regras recebem apenas as mãos.
         hands = getattr(frame, "hands", frame)
+
+        self.last_trace = []
+        self.last_winner = None
+        self.last_cooldown = self.cooldown_counter > 0
 
         # -------------------------------------------
         # Cooldown ativo — retorna último gesto estável
@@ -121,9 +139,20 @@ class DetectorManager:
                                 type(det).__name__, e
                             )
 
+                entry = {
+                    "detector": type(det).__name__,
+                    "label": str(label) if label else None,
+                    "score": round(float(score), 4),
+                }
+                motion = getattr(det, "last_motion", None)
+                if motion is not None:
+                    entry["motion"] = round(float(motion), 5)
+                self.last_trace.append(entry)
+
                 if label and score > best_score:
                     best_label = label
                     best_score = score
+                    self.last_winner = type(det).__name__
 
             except Exception as e:
                 logger.warning(

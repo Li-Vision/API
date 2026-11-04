@@ -23,7 +23,7 @@ detection:
 # DETECTORES BASEADOS EM REGRAS
 # ---------------------------------------------------
 rules:
-  enabled: true
+  enabled: false
 
   letters:
     - A
@@ -55,6 +55,11 @@ dynamic_ml:
   confidence_threshold: 0.70
 
   window_size: 15
+
+  # Movimento minimo da janela (ver holistic_features.window_motion) para o
+  # dinamico classificar. 0 desliga. No dataset atual o menor valor medido e'
+  # 0.0016 (SIM); ajuste com o log de inferencia (campo "motion").
+  min_motion: 0.0015
 
 
 # ---------------------------------------------------

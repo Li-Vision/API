@@ -521,6 +521,7 @@ class TrainingService:
                 num_classes=num_classes,
                 dropout=dropout,
                 bidirectional=bidirectional,
+                pooling="mean",
             )
 
             # ── Treinamento ─────────────────────────────────────────
@@ -660,6 +661,7 @@ class TrainingService:
                 "hidden_size": hidden_size,
                 "num_layers": num_layers,
                 "bidirectional": bidirectional,
+                "pooling": "mean",
                 "window_size": window_size,
                 "feature_schema": feature_schema,
             }

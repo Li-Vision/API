@@ -78,7 +78,7 @@ async def websocket_detect(websocket: WebSocket):
     # Extrai modo de conexão do query param (ex: ws://host/ws/detect?mode=hybrid&model=LIBRAS_BR&use_rules=true)
     detection_mode = websocket.query_params.get("mode", None)
     active_model = websocket.query_params.get("model", None)
-    use_rules_str = websocket.query_params.get("use_rules", "true").lower()
+    use_rules_str = websocket.query_params.get("use_rules", "false").lower()
     use_rules = use_rules_str == "true"
     
     session = UserSession(detection_mode=detection_mode, active_model_name=active_model, use_rules=use_rules)
@@ -236,6 +236,7 @@ async def websocket_detect(websocket: WebSocket):
                         "confidence": round(float(score), 4) if score else 0.0,
                         "mode": session.detection_mode,
                         "landmarks": hands_echo,
+                        "debug": manager.debug_info(),
                     })
 
                 except json.JSONDecodeError:

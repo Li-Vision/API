@@ -8,6 +8,10 @@ from src.data_collection import holistic_features as hf
 
 class SequenceGestureDetector:
 
+    # Movimento minimo da janela para classificar (0 = sem portao).
+    min_motion = 0.0
+    last_motion = None
+
     def __init__(self, model_path, window_size, threshold, feature_schema=None):
         self._setup(joblib.load(model_path), window_size, threshold, feature_schema)
 
@@ -141,6 +145,10 @@ class SequenceGestureDetector:
         self.buffer.append(vec)
 
         if len(self.buffer) < self.window_size:
+            return None, 0.0
+
+        self.last_motion = hf.window_motion(self.buffer)
+        if self.last_motion < self.min_motion:
             return None, 0.0
 
         sequence = np.array(self.buffer).flatten().reshape(1, -1)
