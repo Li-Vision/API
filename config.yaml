@@ -23,7 +23,7 @@ detection:
 # DETECTORES BASEADOS EM REGRAS
 # ---------------------------------------------------
 rules:
-  enabled: true
+  enabled: false
 
   letters:
     - A

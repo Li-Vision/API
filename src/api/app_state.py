@@ -39,7 +39,7 @@ class AppState:
         ModelCache.initialize(self.config)
 
         # Inicializa o valor de rules_enabled do banco ou usa o do config.yaml como fallback
-        self.rules_enabled = self.config["rules"].get("enabled", True)
+        self.rules_enabled = self.config["rules"].get("enabled", False)
         try:
             from src.core.supabase_client import supabase
             res = supabase.table("system_settings").select("value").eq("key", "rules_enabled").execute()
