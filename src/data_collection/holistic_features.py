@@ -20,6 +20,8 @@ e devolve a lista de features daquele frame.
 
 from typing import List, Optional
 
+import numpy as np
+
 # ---------------------------------------------------------------------------
 # Constantes de schema
 # ---------------------------------------------------------------------------
@@ -182,6 +184,23 @@ def build_frame_vector(frame, schema: str = DEFAULT_SCHEMA) -> List[float]:
         vec.extend(_face_vector(getattr(frame, "face", None)))
 
     return vec
+
+
+def window_motion(vectors) -> float:
+    """
+    Movimento médio de uma janela de frames: o maior entre a média de |delta|
+    das features das mãos (mudança de forma) e a do pulso absoluto (a mão
+    inteira se deslocando, que quase não aparece nas features relativas).
+    Perto de 0 = mão parada (pose, não gesto).
+    """
+    if len(vectors) < 2:
+        return 0.0
+    hands = np.asarray([v[:HANDS_FEATURES] for v in vectors], dtype=np.float32)
+    delta = np.abs(np.diff(hands, axis=0))
+    if delta.shape[1] < HANDS_FEATURES:  # formato legado: sem pulso absoluto
+        return float(delta.mean())
+    wrist = delta[:, [0, 1, HAND_FEATURES, HAND_FEATURES + 1]]
+    return float(max(delta.mean(), wrist.mean()))
 
 
 def frame_size(schema: str = DEFAULT_SCHEMA) -> int:

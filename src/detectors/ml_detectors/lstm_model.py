@@ -90,6 +90,11 @@ class LSTMGestureDetector:
     Interface compativel com o DetectorManager existente.
     """
 
+    # Movimento minimo da janela para classificar (0 = sem portao). Evita que
+    # uma pose parada seja lida como gesto dinamico.
+    min_motion = 0.0
+    last_motion = None
+
     def __init__(self, model_path: str, window_size: int, threshold: float,
                  input_size: int = 130):
         self.window_size = window_size
@@ -212,6 +217,10 @@ class LSTMGestureDetector:
         self.buffer.append(vec)
 
         if len(self.buffer) < self.window_size:
+            return None, 0.0
+
+        self.last_motion = hf.window_motion(self.buffer)
+        if self.last_motion < self.min_motion:
             return None, 0.0
 
         # Monta tensor 3D: (1, seq_len, features)

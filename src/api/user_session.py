@@ -205,6 +205,7 @@ class UserSession:
                 )
                 det.window_size = ws
                 det.threshold = threshold
+                det.min_motion = config["dynamic_ml"].get("min_motion", 0.0)
                 det.buffer = deque(maxlen=ws)
                 detectors.append(det)
 
@@ -218,7 +219,9 @@ class UserSession:
                                    "e dispararia o gesto em qualquer movimento. Treine-o com outros "
                                    "gestos para poder usa-lo.", name)
                     continue
-                detectors.append(SequenceGestureDetector.from_model(model, window_size, threshold))
+                det = SequenceGestureDetector.from_model(model, window_size, threshold)
+                det.min_motion = config["dynamic_ml"].get("min_motion", 0.0)
+                detectors.append(det)
 
                 logger.info("[UserSession] Detector MLP legado criado: '%s'", name)
 
