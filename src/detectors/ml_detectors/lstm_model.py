@@ -25,9 +25,14 @@ class GestureLSTM(nn.Module):
     """
 
     def __init__(self, input_size: int, hidden_size: int, num_layers: int,
-                 num_classes: int, dropout: float = 0.3, bidirectional: bool = True):
+                 num_classes: int, dropout: float = 0.3, bidirectional: bool = True,
+                 pooling: str = "last"):
         super().__init__()
 
+        # "last": so o ultimo timestep (checkpoints antigos).
+        # "mean": media de todos os timesteps, para a decisao depender da
+        #         trajetoria inteira e nao so do frame final.
+        self.pooling = pooling
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.bidirectional = bidirectional
@@ -69,8 +74,10 @@ class GestureLSTM(nn.Module):
         # GRU output: (batch, seq_len, hidden * directions)
         gru_out, _ = self.gru(x)
 
-        # Usa APENAS o ultimo timestep (contem contexto de toda a sequencia)
-        last_hidden = gru_out[:, -1, :]  # (batch, hidden * directions)
+        if self.pooling == "mean":
+            last_hidden = gru_out.mean(dim=1)  # (batch, hidden * directions)
+        else:
+            last_hidden = gru_out[:, -1, :]  # (batch, hidden * directions)
 
         last_hidden = self.dropout(last_hidden)
         logits = self.classifier(last_hidden)
@@ -112,6 +119,7 @@ class LSTMGestureDetector:
             num_classes=len(self.classes),
             dropout=0.0,  # inferencia sem dropout
             bidirectional=checkpoint.get("bidirectional", True),
+            pooling=checkpoint.get("pooling", "last"),
         )
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.model.eval()  # modo inferencia (desativa dropout/batchnorm training)

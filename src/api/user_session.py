@@ -185,6 +185,7 @@ class UserSession:
                     num_classes=len(classes),
                     dropout=0.0,
                     bidirectional=bidirectional,
+                    pooling=checkpoint.get("pooling", "last"),
                 )
                 gru_model.load_state_dict(checkpoint["model_state_dict"])
                 gru_model.eval()
