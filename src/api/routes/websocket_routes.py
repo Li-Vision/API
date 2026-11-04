@@ -236,6 +236,7 @@ async def websocket_detect(websocket: WebSocket):
                         "confidence": round(float(score), 4) if score else 0.0,
                         "mode": session.detection_mode,
                         "landmarks": hands_echo,
+                        "debug": manager.debug_info(),
                     })
 
                 except json.JSONDecodeError:

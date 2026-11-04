@@ -53,3 +53,15 @@ def test_gate_lets_moving_hand_through():
 
 def test_gate_disabled_by_default():
     assert _run(_detector(min_motion=0.0), step=0.0)[0] in ("X", "Y")
+
+
+def test_manager_reports_winner_and_motion():
+    from src.recognition.detector_manager import DetectorManager
+
+    manager = DetectorManager([_detector(min_motion=0.0)], min_score=0.1,
+                              stability_frames=3, cooldown_frames=0)
+    for i in range(WINDOW):
+        manager.detect(HolisticFrame(hands=[_hand(i * 0.02)]))
+    info = manager.debug_info()  # frame em que a janela enche
+    assert info["winner"] == "LSTMGestureDetector"
+    assert info["trace"][0]["motion"] > 0
