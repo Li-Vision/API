@@ -136,6 +136,7 @@ class SequenceGestureDetector:
 
     def detect(self, frame):
 
+        self.last_motion = None  # so vale para a janela avaliada neste frame
         hands = getattr(frame, "hands", frame)
         if not hands:
             self.buffer.clear()

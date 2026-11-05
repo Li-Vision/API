@@ -110,3 +110,13 @@ def test_hold_expires_after_hold_seconds():
     assert mgr.detect(frame)[0] == "C"                # ainda dentro do hold
     now[0] = 0.7
     assert mgr.detect(frame) == (None, 0.0)           # hold de 0.5 s expirou
+
+
+def test_last_motion_is_cleared_while_window_fills():
+    det = _detector(min_motion=0.0)
+    _run(det, step=0.02)
+    assert det.last_motion is not None               # janela cheia: medido
+    det.detect(HolisticFrame(hands=[_hand()]))       # janela avanca com 1 frame novo
+    det.buffer.clear()
+    det.detect(HolisticFrame(hands=[_hand()]))       # janela vazia de novo
+    assert det.last_motion is None                   # nao herda o valor antigo
