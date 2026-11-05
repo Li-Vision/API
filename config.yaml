@@ -16,7 +16,10 @@ detection:
   # parâmetros globais do DetectorManager
   min_score: 0.7
   stability_frames: 3
-  cooldown_frames: 10
+  # Tempo (s) que o gesto fica na tela apos detectado e depois de perder a
+  # confianca. Em segundos porque o aparelho entrega ~3 frames/s.
+  cooldown_seconds: 1.0
+  hold_seconds: 0.5
 
 
 # ---------------------------------------------------

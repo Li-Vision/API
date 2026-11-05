@@ -59,9 +59,64 @@ def test_manager_reports_winner_and_motion():
     from src.recognition.detector_manager import DetectorManager
 
     manager = DetectorManager([_detector(min_motion=0.0)], min_score=0.1,
-                              stability_frames=3, cooldown_frames=0)
+                              stability_frames=3, cooldown_seconds=0)
     for i in range(WINDOW):
         manager.detect(HolisticFrame(hands=[_hand(i * 0.02)]))
     info = manager.debug_info()  # frame em que a janela enche
     assert info["winner"] == "LSTMGestureDetector"
     assert info["trace"][0]["motion"] > 0
+
+
+class _Always:
+    """Detector que sempre responde 'C' com alta confianca."""
+
+    def __init__(self, label="C"):
+        self.label = label
+
+    def detect(self, frame):
+        return self.label, 0.95
+
+
+def test_cooldown_and_hold_are_time_based():
+    from src.recognition.detector_manager import DetectorManager
+
+    now = [0.0]
+    det = _Always()
+    mgr = DetectorManager([det], min_score=0.7, stability_frames=2,
+                          cooldown_seconds=1.0, hold_seconds=0.5, clock=lambda: now[0])
+    frame = HolisticFrame(hands=[_hand()])
+
+    assert mgr.detect(frame) == (None, 0.0)           # 1o frame: ainda estabilizando
+    assert mgr.detect(frame)[0] == "C"                # 2o frame: estavel -> cooldown
+    det.label = "D"
+    now[0] = 0.9                                      # dentro do cooldown de 1 s
+    assert mgr.detect(frame)[0] == "C"                # segura o gesto anterior
+    now[0] = 1.1                                      # cooldown acabou
+    assert mgr.detect(frame)[0] == "C"                # D ainda estabilizando
+    assert mgr.detect(frame)[0] == "D"                # D vence (nao ficou preso em C)
+
+
+def test_hold_expires_after_hold_seconds():
+    from src.recognition.detector_manager import DetectorManager
+
+    now = [0.0]
+    det = _Always()
+    mgr = DetectorManager([det], min_score=0.7, stability_frames=1,
+                          cooldown_seconds=0, hold_seconds=0.5, clock=lambda: now[0])
+    frame = HolisticFrame(hands=[_hand()])
+    assert mgr.detect(frame)[0] == "C"
+    det.detect = lambda f: (None, 0.0)                # perdeu a confianca
+    now[0] = 0.3
+    assert mgr.detect(frame)[0] == "C"                # ainda dentro do hold
+    now[0] = 0.7
+    assert mgr.detect(frame) == (None, 0.0)           # hold de 0.5 s expirou
+
+
+def test_last_motion_is_cleared_while_window_fills():
+    det = _detector(min_motion=0.0)
+    _run(det, step=0.02)
+    assert det.last_motion is not None               # janela cheia: medido
+    det.detect(HolisticFrame(hands=[_hand()]))       # janela avanca com 1 frame novo
+    det.buffer.clear()
+    det.detect(HolisticFrame(hands=[_hand()]))       # janela vazia de novo
+    assert det.last_motion is None                   # nao herda o valor antigo

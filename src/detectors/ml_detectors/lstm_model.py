@@ -208,6 +208,7 @@ class LSTMGestureDetector:
         Processa um frame e retorna (label, score) se a janela estiver cheia.
         Interface compativel com DetectorManager.
         """
+        self.last_motion = None  # so vale para a janela avaliada neste frame
         hands = getattr(frame, "hands", frame)
         if not hands:
             self.buffer.clear()

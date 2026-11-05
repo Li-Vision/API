@@ -108,7 +108,8 @@ class UserSession:
             detectors,
             min_score=config["detection"].get("min_score", 0.6),
             stability_frames=config["detection"].get("stability_frames", 3),
-            cooldown_frames=config["detection"].get("cooldown_frames", 10),
+            cooldown_seconds=config["detection"].get("cooldown_seconds", 1.0),
+            hold_seconds=config["detection"].get("hold_seconds", 0.5),
         )
 
     def _create_static_detectors(self, config) -> list:
