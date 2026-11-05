@@ -1,5 +1,6 @@
 from collections import deque
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -18,13 +19,22 @@ class DetectorManager:
     - Estabilizar detecções no tempo
     """
 
+    # Valores padrao no nivel da classe: instancias criadas sem __init__ (testes)
+    # continuam funcionando.
+    cooldown_until = 0.0
+    last_hit = 0.0
+    cooldown_seconds = 1.0
+    hold_seconds = 0.5
+    _clock = staticmethod(time.monotonic)
+
     def __init__(
         self,
         detectors,
         min_score=0.6,
         stability_frames=3,
-        cooldown_frames=10,
-        hold_frames=5,
+        cooldown_seconds=1.0,
+        hold_seconds=0.5,
+        clock=None,
     ):
         self.detectors = detectors
         self.min_score = min_score
@@ -32,19 +42,23 @@ class DetectorManager:
         # estabilização temporal
         self.history = deque(maxlen=stability_frames)
 
-        # cooldown
-        self.cooldown_frames = cooldown_frames
-        self.cooldown_counter = 0
+        # cooldown (em SEGUNDOS, nao em frames: o aparelho entrega ~3 frames/s,
+        # entao 10 frames travavam o mesmo gesto na tela por varios segundos)
+        self.cooldown_seconds = cooldown_seconds
+        self.cooldown_until = 0.0
 
         # memória do último gesto detectado
         self.last_label = None
         self.last_score = 0.0
 
-        # Frames seguidos sem detecção confiável. Passando de `hold_frames`,
-        # o último gesto é esquecido; sem isso a tela ficava presa na última
-        # letra (A/C) enquanto o modelo não alcançava o limiar de confiança.
-        self.hold_frames = hold_frames
-        self.miss_frames = 0
+        # Tempo sem detecção confiável. Passando de `hold_seconds`, o último
+        # gesto é esquecido; sem isso a tela ficava presa na última letra (A/C)
+        # enquanto o modelo não alcançava o limiar de confiança.
+        self.hold_seconds = hold_seconds
+        self.last_hit = 0.0
+
+        if clock is not None:
+            self._clock = clock
 
         # Diagnostico do ultimo frame: o que cada detector respondeu e quem
         # venceu. Alimenta o log de inferencia do app.
@@ -62,8 +76,7 @@ class DetectorManager:
 
     def _miss(self):
         """Registra um frame sem detecção e devolve o gesto ainda retido."""
-        self.miss_frames += 1
-        if self.miss_frames > self.hold_frames:
+        if self._clock() - self.last_hit > self.hold_seconds:
             self.last_label = None
             self.last_score = 0.0
         return self.last_label, self.last_score
@@ -97,13 +110,13 @@ class DetectorManager:
 
         self.last_trace = []
         self.last_winner = None
-        self.last_cooldown = self.cooldown_counter > 0
+        now = self._clock()
+        self.last_cooldown = now < self.cooldown_until
 
         # -------------------------------------------
         # Cooldown ativo — retorna último gesto estável
         # -------------------------------------------
-        if self.cooldown_counter > 0:
-            self.cooldown_counter -= 1
+        if self.last_cooldown:
             return self.last_label, self.last_score
 
         if not hands:
@@ -168,7 +181,7 @@ class DetectorManager:
             self.history.clear()
             return self._miss()
 
-        self.miss_frames = 0
+        self.last_hit = now
 
         # -------------------------------------------
         # Estabilização temporal
@@ -188,7 +201,7 @@ class DetectorManager:
             self.last_score = best_score
 
             # ativa cooldown
-            self.cooldown_counter = self.cooldown_frames
+            self.cooldown_until = now + self.cooldown_seconds
             self.history.clear()
 
             # Evita o "ghosting" de gestos dinâmicos: limpa os buffers para 
