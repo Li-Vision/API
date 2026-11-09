@@ -81,6 +81,60 @@ def test_confianca_abaixo_do_threshold_nao_retorna_label(detector_cls):
     assert det.detect(_frame()) == (None, 0.0)
 
 
+def _hand(x):
+    return [{"x": x, "y": 0.5, "z": 0.0} for _ in range(21)]
+
+
+def _frame_duas_maos():
+    return parse_input({
+        "hands": [_hand(0.3), _hand(0.7)],
+        "pose": [{"x": 0.4, "y": 0.6, "z": 0.0, "visibility": 0.99} for _ in range(33)],
+        "face": [{"x": 0.5, "y": 0.5, "z": 0.0} for _ in range(478)],
+    })
+
+
+class _OneHandOnlyModel:
+    """Treinado só com uma mão: bloco da mão 2 preenchido vira 'C' (nunca visto)."""
+
+    n_features_in_ = HOLISTIC_DIM
+    classes_ = np.array(["A", "C"])
+
+    def predict_proba(self, X):
+        v = np.asarray(X[0])
+        hand2 = v[hf.HAND_FEATURES:hf.HANDS_FEATURES]
+        if np.any(hand2):
+            return np.array([[0.05, 0.95]])  # confiante e errado
+        return np.array([[0.9, 0.1]]) if v[0] < 0.5 else np.array([[0.6, 0.4]])
+
+
+def test_duas_maos_nao_viram_C_avalia_cada_mao_como_mao_1(detector_cls):
+    det = object.__new__(detector_cls)
+    det.model = types.SimpleNamespace(model=_OneHandOnlyModel())
+    det.threshold = 0.7
+
+    label, confidence = det.detect(_frame_duas_maos())
+
+    assert label == "A"  # sem a correção seria ("C", 0.95)
+    assert confidence == pytest.approx(0.9)  # vence a mão mais confiante
+
+
+def test_duas_maos_todas_abaixo_do_threshold_nao_retorna_label(detector_cls):
+    det = object.__new__(detector_cls)
+    det.model = types.SimpleNamespace(model=_OneHandOnlyModel())
+    det.threshold = 0.95
+
+    assert det.detect(_frame_duas_maos()) == (None, 0.0)
+
+
+def test_uma_mao_continua_igual(detector_cls):
+    det = object.__new__(detector_cls)
+    det.model = types.SimpleNamespace(model=_OneHandOnlyModel())
+    det.threshold = 0.7
+
+    # Com 1 mão o frame vai direto ao modelo (0.6 < threshold), sem reavaliação.
+    assert det.detect(_frame()) == (None, 0.0)
+
+
 def test_manager_entrega_frame_inteiro_para_detector_holistico():
     """Sem isso o detector receberia uma mão e quebraria por dimensão."""
     from src.recognition.detector_manager import DetectorManager

@@ -12,6 +12,7 @@ Responsabilidade:
 NÃO depende de OpenCV.
 """
 
+from dataclasses import replace  # Copia o frame holístico trocando só as mãos
 from pathlib import Path  # Para manipulação segura de caminhos de arquivos
 import numpy as np       # Para manipulação de arrays numéricos
 import joblib            # Para carregar modelos scikit-learn serializados
@@ -215,6 +216,33 @@ class MLDetector(BaseDetector):
         n_in = _n_features_in(self.model.model)
         return n_in == hf.HANDS_FEATURES + hf.POSE_FEATURES + hf.FACE_FEATURES
 
+    def _predict_holistic(self, frame, hf):
+        """
+        Prediz (label, confiança) de um frame holístico.
+
+        Os datasets estáticos são de UMA mão: o bloco da mão 2 fica zerado em
+        todo o treino. Se o frame traz duas mãos (a outra mão, ou uma detecção
+        falsa do MediaPipe), o modelo recebe um padrão que nunca viu e responde
+        com confiança alta, quase sempre "C". Por isso, com 2+ mãos cada uma é
+        avaliada sozinha (como mão 1, bloco 2 zerado) e vence a de maior
+        confiança. Pose e face são mantidas.
+        """
+        hands = getattr(frame, "hands", None)
+        if hands is not None and len(hands) > 1:
+            candidates = [replace(frame, hands=[hand]) for hand in hands]
+        else:
+            candidates = [frame]
+
+        best_label, best_conf = None, 0.0
+        for candidate in candidates:
+            features = hf.build_frame_vector(candidate, hf.SCHEMA_HOLISTIC_V1)
+            probs = self.model.model.predict_proba([features])[0]
+            idx = int(np.argmax(probs))
+            conf = float(probs[idx])
+            if best_label is None or conf > best_conf:
+                best_label, best_conf = self.model.model.classes_[idx], conf
+        return best_label, best_conf
+
     def detect(self, landmarks):
         """
         Implementa método detect() da interface BaseDetector.
@@ -229,10 +257,7 @@ class MLDetector(BaseDetector):
         if self.expects_holistic_frame:
             from src.data_collection import holistic_features as hf
 
-            features = hf.build_frame_vector(landmarks, hf.SCHEMA_HOLISTIC_V1)
-            probs = self.model.model.predict_proba([features])[0]
-            idx = int(np.argmax(probs))
-            label, confidence = self.model.model.classes_[idx], float(probs[idx])
+            label, confidence = self._predict_holistic(landmarks, hf)
             return (None, 0.0) if confidence < self.threshold else (label, confidence)
 
         label, confidence = self.model.predict_with_confidence(landmarks)
