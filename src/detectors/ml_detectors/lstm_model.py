@@ -1,3 +1,5 @@
+import time
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -94,6 +96,19 @@ class LSTMGestureDetector:
     # uma pose parada seja lida como gesto dinamico.
     min_motion = 0.0
     last_motion = None
+
+    # Entrada da mao no quadro. O app nao envia frames sem mao, entao o servidor
+    # so percebe que a mao saiu pelo intervalo entre frames. A chegada (e o
+    # assentamento dos landmarks) parece movimento e, com a mao aberta, o modelo
+    # le a pose como "OI" sem ninguem ter feito o gesto. Depois de uma pausa
+    # maior que `reentry_gap_seconds` o buffer e' limpo e os primeiros
+    # `reentry_skip_frames` frames da nova entrada nao entram na janela.
+    # 0 desliga (padrao); o valor de producao vem do config.yaml.
+    reentry_gap_seconds = 0.0
+    reentry_skip_frames = 0
+    clock = staticmethod(time.monotonic)
+    _last_frame_at = None
+    _skip_frames = 0
 
     def __init__(self, model_path: str, window_size: int, threshold: float,
                  input_size: int = 130):
@@ -212,6 +227,20 @@ class LSTMGestureDetector:
         hands = getattr(frame, "hands", frame)
         if not hands:
             self.buffer.clear()
+            self._last_frame_at = None
+            return None, 0.0
+
+        now = self.clock()
+        entering = self._last_frame_at is None or (
+            self.reentry_gap_seconds > 0
+            and now - self._last_frame_at > self.reentry_gap_seconds
+        )
+        self._last_frame_at = now
+        if entering:
+            self.buffer.clear()
+            self._skip_frames = self.reentry_skip_frames
+        if self._skip_frames > 0:
+            self._skip_frames -= 1
             return None, 0.0
 
         vec = self.landmarks_to_vector(frame)
