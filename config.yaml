@@ -64,6 +64,14 @@ dynamic_ml:
   # 0.0016 (SIM); ajuste com o log de inferencia (campo "motion").
   min_motion: 0.0015
 
+  # Entrada da mao no quadro: o app nao envia frames sem mao, entao uma pausa
+  # maior que reentry_gap_seconds entre frames conta como "a mao saiu e voltou".
+  # Nessa volta o buffer e' limpo e os primeiros reentry_skip_frames frames sao
+  # descartados, porque a chegada da mao passa do portao de movimento e o modelo
+  # le a mao aberta como OI. 0 desliga.
+  reentry_gap_seconds: 0.5
+  reentry_skip_frames: 6
+
 
 # ---------------------------------------------------
 # ENTRADA HOLÍSTICA v2 (mãos + corpo + rosto)

@@ -207,6 +207,8 @@ class UserSession:
                 det.window_size = ws
                 det.threshold = threshold
                 det.min_motion = config["dynamic_ml"].get("min_motion", 0.0)
+                det.reentry_gap_seconds = config["dynamic_ml"].get("reentry_gap_seconds", 0.0)
+                det.reentry_skip_frames = config["dynamic_ml"].get("reentry_skip_frames", 0)
                 det.buffer = deque(maxlen=ws)
                 detectors.append(det)
 
