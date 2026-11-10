@@ -17,6 +17,8 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler
 from src.core.supabase_client import supabase
 from src.core.pagination import fetch_all
 from src.data_collection import holistic_features as hf
+from src.data_collection import hand_shape_features as hs
+from src.training.static_trainer import train_hand_shape_classifier
 
 logger = logging.getLogger(__name__)
 
@@ -163,7 +165,9 @@ class TrainingService:
             self._update_job(job_id, {"progress": 10, "current_epoch": 0, "total_epochs": 0, "stage": "loading_data"})
 
             data = fetch_all(
-                lambda: supabase.table("samples").select("label, features").in_("dataset_id", dataset_ids)
+                lambda: supabase.table("samples")
+                .select("label, features, user_id, created_at")
+                .in_("dataset_id", dataset_ids)
             )
             
             if len(data) < 2:
@@ -182,154 +186,28 @@ class TrainingService:
                     "os datasets 'só mãos' e os holísticos."
                 )
 
-            X = pd.DataFrame(df['features'].to_list())
-            y = df['label']
-
             total_samples = len(df)
-            n_classes = y.nunique()
+            holistic_dim = hf.frame_size(hf.SCHEMA_HOLISTIC_V1)
 
-            # ── Etapa 2: Preparando modelo ─────────────────────────────
-            self._update_job(job_id, {"progress": 30, "stage": "preparing_model"})
-
-            # ── Holdout estratificado ──────────────────────────────────
-            # A acuracia era medida com clf.predict(X) sobre os MESMOS dados do
-            # fit. Com 299 features (holistic_v1) e poucas amostras a MLP decora
-            # o conjunto: o app exibia ~99% enquanto o reconhecimento real
-            # falhava — nao havia como distinguir modelo bom de modelo decorado.
-            #
-            # Estratificar exige >= 2 amostras por classe; com menos que isso
-            # (ou com poucas amostras no total) nao ha' holdout possivel e o
-            # treino usa tudo, sinalizando que a metrica e' otimista.
-            counts = y.value_counts()
-            can_split = bool(len(counts) >= 2 and counts.min() >= 2 and total_samples >= 10)
-
-            if can_split:
-                # test_size ajustado para garantir >= 1 amostra por classe no
-                # teste; com muitas classes e poucas amostras, 20% nao basta.
-                test_size = max(0.2, n_classes / total_samples)
-                # Deixa pelo menos metade dos dados para treino.
-                test_size = min(test_size, 0.4)
-                X_train, X_test, y_train, y_test = train_test_split(
-                    X, y,
-                    test_size=test_size,
-                    random_state=42,
-                    stratify=y,
-                )
+            if tamanhos == {holistic_dim}:
+                # Dataset holistico: a letra e' decidida pela FORMA DA MAO.
+                # Corpo, rosto e posicao na tela ficam de fora — com eles o
+                # modelo decorava quem gravou (99% no teste, 0% no B de outra
+                # pessoa). Ver src/training/static_trainer.py.
+                self._update_job(job_id, {"progress": 30, "stage": "preparing_model"})
+                t_fit = time.time()
+                with threadpool_limits(limits=2):
+                    result = train_hand_shape_classifier(data)
+                logger.info("[Static] treino por forma da mao em %.1fs (%d amostras)",
+                            time.time() - t_fit, result["used_samples"])
+                clf, acc, report = result["model"], result["accuracy"], result["report"]
+                evaluated = result["evaluated"]
+                n_features, layers = hs.FEATURES, (128, 64)
+                feature_schema = hs.SCHEMA_HAND_SHAPE_V1
+                self._update_job(job_id, {"progress": 80, "stage": "evaluating"})
             else:
-                X_train, y_train = X, y
-                X_test, y_test = None, None
-
-            # ── MLP Otimizado ──────────────────────────────────────────
-            # Camadas proporcionais ao numero de features e classes
-            n_features = X.shape[1]
-            layer1 = min(256, max(128, n_features))
-            layer2 = max(64, layer1 // 2)
-            layer3 = max(32, n_classes * 4)
-
-            n_train = len(X_train)
-
-            # early_stopping reserva validation_fraction do treino para decidir
-            # a parada. Com poucas amostras essa fatia vira 3 ou 4 exemplos e a
-            # decisao passa a ser ruido — pior que simplesmente treinar ate' o
-            # fim com a regularizacao L2 segurando o overfitting.
-            use_early_stopping = n_train >= 50
-
-            # Os rotulos sao texto ("A", "CASA"). Com early_stopping ligado, o
-            # MLPClassifier do sklearn 1.8 quebra ao pontuar a fatia interna de
-            # validacao com rotulos nao numericos:
-            #   TypeError: ufunc 'isnan' not supported for the input types
-            # Como early_stopping era incondicional antes, TODO treino com >= 50
-            # amostras falhava. Codificar para inteiro resolve na raiz; o
-            # LabelEncoder viaja no joblib para reconstruir as letras depois.
-            # Balanceia SO o treino (o holdout continua com a distribuicao real).
-            # O MLP do sklearn nao tem class_weight: com C=344 e D=6 amostras o
-            # modelo aprendia a "chutar" a letra mais frequente.
-            X_train, y_train = _oversample_minorities(X_train, y_train)
-
-            label_encoder = LabelEncoder()
-            y_train_enc = label_encoder.fit_transform(y_train)
-
-            # StandardScaler + MLP no MESMO Pipeline: o scaler e' ajustado so'
-            # com os dados de treino a cada fit e viaja junto no joblib, entao a
-            # inferencia aplica exatamente a mesma transformacao.
-            #
-            # Sem ele o holistic_v1 era treinado com blocos em escalas
-            # incompativeis — maos relativas ao pulso (~+-0.1), pose relativa
-            # aos ombros (~+-0.3) e rosto relativo ao centroide (~+-0.03).
-            # A MLP e' sensivel a escala e o L2 (alpha) penaliza os pesos por
-            # igual, entao as 117 features de rosto quase nao contribuiam:
-            # somavam dimensionalidade sem informacao util, o que com poucas
-            # amostras PIORA o resultado em vez de melhorar.
-            clf = Pipeline([
-                ("scaler", StandardScaler()),
-                ("mlp", MLPClassifier(
-                    hidden_layer_sizes=(layer1, layer2, layer3),
-                    activation='relu',
-                    solver='adam',
-                    max_iter=800,
-                    random_state=42,
-                    early_stopping=use_early_stopping,
-                    validation_fraction=0.15,        # 15% para validacao
-                    n_iter_no_change=25,             # Paciencia
-                    alpha=0.001,                     # Regularizacao L2
-                    learning_rate='adaptive',        # Reduz LR quando estagna
-                    learning_rate_init=0.001,
-                    batch_size=min(128, max(16, len(X_train) // 4)),
-                )),
-            ])
-            # Matrizes pequenas (lote de ~100 x 269) nao compensam o custo de
-            # sincronizar dezenas de threads do BLAS: o MLP chegava a rodar ~7x
-            # mais lento so' por isso, e pior onde o container enxerga mais
-            # nucleos do que a cota de CPU que realmente recebe (caso do Render).
-            # Limitar a 2 threads deixou o fit de ~16s em ~1,5s, com a mesma
-            # acuracia, num teste local.
-            t_fit = time.time()
-            with threadpool_limits(limits=2):
-                clf.fit(X_train, y_train_enc)
-            logger.info("[Static] fit em %.1fs (%d iteracoes, %d amostras)",
-                        time.time() - t_fit, clf.named_steps["mlp"].n_iter_, len(X_train))
-
-            # Devolve os rotulos originais ao modelo.
-            #
-            # Reescrever `classes_` sozinho NAO basta (medido): o MLPClassifier
-            # decodifica a saida de `predict` pelo seu `_label_binarizer`, que
-            # continuaria devolvendo inteiros — `predict` retornava 0 em vez de
-            # "A". Reajustar o binarizer nas letras alinha os dois caminhos que
-            # os consumidores usam: `predict` e o par
-            # `classes_[argmax(predict_proba)]` do MLDetector.
-            mlp = clf.named_steps["mlp"]
-            mlp._label_binarizer.fit(label_encoder.classes_)
-            mlp.classes_ = label_encoder.classes_
-
-            # ── Etapa 3: Avaliando ─────────────────────────────────────
-            self._update_job(job_id, {"progress": 80, "stage": "evaluating"})
-
-            if X_test is not None:
-                # Metrica REAL: dados que o modelo nunca viu.
-                y_pred = clf.predict(X_test)
-                acc = accuracy_score(y_test, y_pred)
-                report = classification_report(y_test, y_pred, zero_division=0)
-                report = (
-                    f"Avaliado em {len(y_test)} amostras de teste "
-                    f"(holdout estratificado; treino: {n_train}).\n\n" + report
-                )
-            else:
-                # Sem dados suficientes para separar teste. A acuracia aqui e'
-                # de TREINO e mede memorizacao, nao generalizacao — dizer isso
-                # no relatorio evita que 100% seja lido como modelo pronto.
-                y_pred = clf.predict(X_train)
-                acc = accuracy_score(y_train, y_pred)
-                report = classification_report(y_train, y_pred, zero_division=0)
-                motivo = (
-                    "menos de 2 amostras em alguma classe"
-                    if len(counts) >= 2 and counts.min() < 2
-                    else f"apenas {total_samples} amostras no total"
-                )
-                report = (
-                    f"ATENCAO: acuracia medida sobre os proprios dados de treino "
-                    f"({motivo}); ela mede memorizacao, nao acerto real. "
-                    f"Colete mais amostras para obter uma medida confiavel.\n\n" + report
-                )
+                clf, acc, report, evaluated, n_features, layers = self._fit_legacy_static(df, job_id)
+                feature_schema = hf.SCHEMA_HANDS_V1
 
             os.makedirs(_MODEL_TMP_DIR, exist_ok=True)
             local_path = os.path.join(_MODEL_TMP_DIR, f"{model_name}_{model_type}.joblib")
@@ -348,13 +226,20 @@ class TrainingService:
                     file_options={"content-type": "application/octet-stream"}
                 )
 
-            supabase.table("models").update({
+            model_update = {
                 "storage_path": storage_path,
                 "accuracy": acc,
                 "classification_report": report,
                 "total_samples_trained": total_samples,
                 "updated_at": "now()"
-            }).eq("id", model_id).execute()
+            }
+            try:
+                supabase.table("models").update(
+                    {**model_update, "feature_schema": feature_schema}
+                ).eq("id", model_id).execute()
+            except Exception as exc:  # coluna feature_schema pode nao existir
+                logger.warning("[Static] update com feature_schema falhou (%s); gravando sem.", exc)
+                supabase.table("models").update(model_update).eq("id", model_id).execute()
 
             self._update_job(job_id, {
                 "status": "completed",
@@ -364,11 +249,12 @@ class TrainingService:
             })
 
             logger.info(
-                "[Static] Modelo treinado: %s | Acc(%s): %.2f%% | Samples: %d | "
-                "Features: %d | Layers: %s",
+                "[Static] Modelo treinado: %s | Acc(%s): %s | Samples: %d | "
+                "Features: %d (%s) | Layers: %s",
                 model_name,
-                "teste" if X_test is not None else "treino/otimista",
-                acc * 100, total_samples, n_features, (layer1, layer2, layer3),
+                "teste" if evaluated else "sem teste",
+                "n/d" if acc is None else f"{acc * 100:.2f}%",
+                total_samples, n_features, feature_schema, layers,
             )
 
             return {"status": "completed", "accuracy": acc, "job_id": job_id, "type": model_type}
@@ -377,6 +263,164 @@ class TrainingService:
             logger.error(f"Erro no treinamento de {model_type}: {e}")
             self._update_job(job_id, {"status": "failed", "error": str(e), "completed_at": "now()"})
             return {"status": "failed", "error": str(e), "job_id": job_id, "type": model_type}
+
+    def _fit_legacy_static(self, df, job_id: str):
+        """
+        Treino estatico antigo: MLP direto sobre as features gravadas.
+
+        Continua valendo para datasets "so' maos" (42 features por amostra).
+        Devolve (modelo, acuracia, relatorio, avaliado_em_teste, n_features, camadas).
+        """
+        X = pd.DataFrame(df['features'].to_list())
+        y = df['label']
+
+        total_samples = len(df)
+        n_classes = y.nunique()
+
+        # ── Etapa 2: Preparando modelo ─────────────────────────────
+        self._update_job(job_id, {"progress": 30, "stage": "preparing_model"})
+
+        # ── Holdout estratificado ──────────────────────────────────
+        # A acuracia era medida com clf.predict(X) sobre os MESMOS dados do
+        # fit. Com 299 features (holistic_v1) e poucas amostras a MLP decora
+        # o conjunto: o app exibia ~99% enquanto o reconhecimento real
+        # falhava — nao havia como distinguir modelo bom de modelo decorado.
+        #
+        # Estratificar exige >= 2 amostras por classe; com menos que isso
+        # (ou com poucas amostras no total) nao ha' holdout possivel e o
+        # treino usa tudo, sinalizando que a metrica e' otimista.
+        counts = y.value_counts()
+        can_split = bool(len(counts) >= 2 and counts.min() >= 2 and total_samples >= 10)
+
+        if can_split:
+            # test_size ajustado para garantir >= 1 amostra por classe no
+            # teste; com muitas classes e poucas amostras, 20% nao basta.
+            test_size = max(0.2, n_classes / total_samples)
+            # Deixa pelo menos metade dos dados para treino.
+            test_size = min(test_size, 0.4)
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y,
+                test_size=test_size,
+                random_state=42,
+                stratify=y,
+            )
+        else:
+            X_train, y_train = X, y
+            X_test, y_test = None, None
+
+        # ── MLP Otimizado ──────────────────────────────────────────
+        # Camadas proporcionais ao numero de features e classes
+        n_features = X.shape[1]
+        layer1 = min(256, max(128, n_features))
+        layer2 = max(64, layer1 // 2)
+        layer3 = max(32, n_classes * 4)
+
+        n_train = len(X_train)
+
+        # early_stopping reserva validation_fraction do treino para decidir
+        # a parada. Com poucas amostras essa fatia vira 3 ou 4 exemplos e a
+        # decisao passa a ser ruido — pior que simplesmente treinar ate' o
+        # fim com a regularizacao L2 segurando o overfitting.
+        use_early_stopping = n_train >= 50
+
+        # Os rotulos sao texto ("A", "CASA"). Com early_stopping ligado, o
+        # MLPClassifier do sklearn 1.8 quebra ao pontuar a fatia interna de
+        # validacao com rotulos nao numericos:
+        #   TypeError: ufunc 'isnan' not supported for the input types
+        # Como early_stopping era incondicional antes, TODO treino com >= 50
+        # amostras falhava. Codificar para inteiro resolve na raiz; o
+        # LabelEncoder viaja no joblib para reconstruir as letras depois.
+        # Balanceia SO o treino (o holdout continua com a distribuicao real).
+        # O MLP do sklearn nao tem class_weight: com C=344 e D=6 amostras o
+        # modelo aprendia a "chutar" a letra mais frequente.
+        X_train, y_train = _oversample_minorities(X_train, y_train)
+
+        label_encoder = LabelEncoder()
+        y_train_enc = label_encoder.fit_transform(y_train)
+
+        # StandardScaler + MLP no MESMO Pipeline: o scaler e' ajustado so'
+        # com os dados de treino a cada fit e viaja junto no joblib, entao a
+        # inferencia aplica exatamente a mesma transformacao.
+        #
+        # Sem ele o holistic_v1 era treinado com blocos em escalas
+        # incompativeis — maos relativas ao pulso (~+-0.1), pose relativa
+        # aos ombros (~+-0.3) e rosto relativo ao centroide (~+-0.03).
+        # A MLP e' sensivel a escala e o L2 (alpha) penaliza os pesos por
+        # igual, entao as 117 features de rosto quase nao contribuiam:
+        # somavam dimensionalidade sem informacao util, o que com poucas
+        # amostras PIORA o resultado em vez de melhorar.
+        clf = Pipeline([
+            ("scaler", StandardScaler()),
+            ("mlp", MLPClassifier(
+                hidden_layer_sizes=(layer1, layer2, layer3),
+                activation='relu',
+                solver='adam',
+                max_iter=800,
+                random_state=42,
+                early_stopping=use_early_stopping,
+                validation_fraction=0.15,        # 15% para validacao
+                n_iter_no_change=25,             # Paciencia
+                alpha=0.001,                     # Regularizacao L2
+                learning_rate='adaptive',        # Reduz LR quando estagna
+                learning_rate_init=0.001,
+                batch_size=min(128, max(16, len(X_train) // 4)),
+            )),
+        ])
+        # Matrizes pequenas (lote de ~100 x 269) nao compensam o custo de
+        # sincronizar dezenas de threads do BLAS: o MLP chegava a rodar ~7x
+        # mais lento so' por isso, e pior onde o container enxerga mais
+        # nucleos do que a cota de CPU que realmente recebe (caso do Render).
+        # Limitar a 2 threads deixou o fit de ~16s em ~1,5s, com a mesma
+        # acuracia, num teste local.
+        t_fit = time.time()
+        with threadpool_limits(limits=2):
+            clf.fit(X_train, y_train_enc)
+        logger.info("[Static] fit em %.1fs (%d iteracoes, %d amostras)",
+                    time.time() - t_fit, clf.named_steps["mlp"].n_iter_, len(X_train))
+
+        # Devolve os rotulos originais ao modelo.
+        #
+        # Reescrever `classes_` sozinho NAO basta (medido): o MLPClassifier
+        # decodifica a saida de `predict` pelo seu `_label_binarizer`, que
+        # continuaria devolvendo inteiros — `predict` retornava 0 em vez de
+        # "A". Reajustar o binarizer nas letras alinha os dois caminhos que
+        # os consumidores usam: `predict` e o par
+        # `classes_[argmax(predict_proba)]` do MLDetector.
+        mlp = clf.named_steps["mlp"]
+        mlp._label_binarizer.fit(label_encoder.classes_)
+        mlp.classes_ = label_encoder.classes_
+
+        # ── Etapa 3: Avaliando ─────────────────────────────────────
+        self._update_job(job_id, {"progress": 80, "stage": "evaluating"})
+
+        if X_test is not None:
+            # Metrica REAL: dados que o modelo nunca viu.
+            y_pred = clf.predict(X_test)
+            acc = accuracy_score(y_test, y_pred)
+            report = classification_report(y_test, y_pred, zero_division=0)
+            report = (
+                f"Avaliado em {len(y_test)} amostras de teste "
+                f"(holdout estratificado; treino: {n_train}).\n\n" + report
+            )
+        else:
+            # Sem dados suficientes para separar teste. A acuracia aqui e'
+            # de TREINO e mede memorizacao, nao generalizacao — dizer isso
+            # no relatorio evita que 100% seja lido como modelo pronto.
+            y_pred = clf.predict(X_train)
+            acc = accuracy_score(y_train, y_pred)
+            report = classification_report(y_train, y_pred, zero_division=0)
+            motivo = (
+                "menos de 2 amostras em alguma classe"
+                if len(counts) >= 2 and counts.min() < 2
+                else f"apenas {total_samples} amostras no total"
+            )
+            report = (
+                f"ATENCAO: acuracia medida sobre os proprios dados de treino "
+                f"({motivo}); ela mede memorizacao, nao acerto real. "
+                f"Colete mais amostras para obter uma medida confiavel.\n\n" + report
+            )
+
+        return clf, acc, report, X_test is not None, n_features, (layer1, layer2, layer3)
 
     # ================================================================
     # DINAMICO — PyTorch GRU (LSTM-like)

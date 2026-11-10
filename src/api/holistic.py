@@ -41,6 +41,9 @@ class HolisticFrame:
     hands: List[List[MockLandmark]] = field(default_factory=list)
     pose: Optional[List[MockLandmark]] = None
     face: Optional[List[MockLandmark]] = None
+    # Largura / altura da imagem em que os landmarks foram medidos. Opcional:
+    # apps antigos nao enviam e o classificador de forma da mao usa o padrao.
+    aspect: Optional[float] = None
 
     @property
     def has_pose(self) -> bool:
@@ -69,6 +72,64 @@ def _landmarks_from_points(points, with_visibility: bool = False) -> List[MockLa
     return result
 
 
+# Duas "maos" contam como a mesma quando a caixa de uma cobre pelo menos metade
+# da menor e os centros estao a menos de meio tamanho de mao. Medido nas
+# amostras gravadas: deteccoes duplicadas ficam em cobertura >= 0.58 e centros
+# <= 0.41; duas maos de verdade ficam em cobertura 0 e centros >= 0.78.
+_DUP_MIN_COVER = 0.5
+_DUP_MAX_CENTER = 0.5
+
+
+def _hand_box(hand):
+    xs = [lm.x for lm in hand]
+    ys = [lm.y for lm in hand]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _same_hand(a, b) -> bool:
+    ax0, ay0, ax1, ay1 = _hand_box(a)
+    bx0, by0, bx1, by1 = _hand_box(b)
+    area_a = (ax1 - ax0) * (ay1 - ay0)
+    area_b = (bx1 - bx0) * (by1 - by0)
+    smaller = min(area_a, area_b)
+    if smaller <= 0:
+        return False
+    inter = max(0.0, min(ax1, bx1) - max(ax0, bx0)) * max(0.0, min(ay1, by1) - max(ay0, by0))
+    if inter / smaller < _DUP_MIN_COVER:
+        return False
+    size = max(
+        ((ax1 - ax0) ** 2 + (ay1 - ay0) ** 2) ** 0.5,
+        ((bx1 - bx0) ** 2 + (by1 - by0) ** 2) ** 0.5,
+    )
+    center = (((ax0 + ax1) - (bx0 + bx1)) ** 2 + ((ay0 + ay1) - (by0 + by1)) ** 2) ** 0.5 / 2.0
+    return center <= _DUP_MAX_CENTER * size
+
+
+def dedupe_hands(hands: list) -> list:
+    """
+    Remove a "segunda mao" que e' a mesma mao detectada duas vezes.
+
+    O MediaPipe (numHands=2) as vezes devolve a mesma mao em duas deteccoes
+    sobrepostas. Sem este filtro o bloco da mao 2 chega preenchido com uma
+    copia da mao 1: o app desenha um esqueleto duplicado e os modelos recebem
+    um padrao de "duas maos" que nao existe. Fica a primeira (a de maior
+    pontuacao na ordem do MediaPipe).
+    """
+    kept: list = []
+    for hand in hands:
+        if not any(_same_hand(hand, other) for other in kept):
+            kept.append(hand)
+    return kept
+
+
+def _parse_aspect(value) -> Optional[float]:
+    try:
+        aspect = float(value)
+    except (TypeError, ValueError):
+        return None
+    return aspect if 0.2 <= aspect <= 5.0 else None
+
+
 def parse_input(parsed) -> HolisticFrame:
     """
     Normaliza o payload de landmarks recebido pelo WebSocket num HolisticFrame.
@@ -87,17 +148,18 @@ def parse_input(parsed) -> HolisticFrame:
         raw_pose = parsed.get("pose")
         raw_face = parsed.get("face")
 
-        hands = _parse_hands(raw_hands)
+        hands = dedupe_hands(_parse_hands(raw_hands))
         pose = _landmarks_from_points(raw_pose, with_visibility=True) if raw_pose else None
         face = _landmarks_from_points(raw_face) if raw_face else None
 
-        return HolisticFrame(hands=hands, pose=pose, face=face)
+        return HolisticFrame(hands=hands, pose=pose, face=face,
+                             aspect=_parse_aspect(parsed.get("aspect")))
 
     # ----- Formato legado (lista de mãos) -----
     if isinstance(parsed, list):
         if len(parsed) == 0:
             raise ValueError("Formato inválido: esperado array de mãos não vazio.")
-        return HolisticFrame(hands=_parse_hands(parsed))
+        return HolisticFrame(hands=dedupe_hands(_parse_hands(parsed)))
 
     raise ValueError("Formato inválido: esperado array de mãos ou objeto holístico.")
 

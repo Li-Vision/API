@@ -203,18 +203,56 @@ class MLDetector(BaseDetector):
         self.threshold = threshold
 
     @property
+    def uses_hand_shape(self) -> bool:
+        """
+        True quando o modelo foi treinado com a forma da mão (`hand_shape_v1`).
+
+        O treino grava o formato no próprio modelo (`feature_schema_`), então
+        não depende de adivinhar pela dimensão de entrada.
+        """
+        from src.data_collection import hand_shape_features as hs
+
+        return getattr(self.model.model, "feature_schema_", None) == hs.SCHEMA_HAND_SHAPE_V1
+
+    @property
     def expects_holistic_frame(self) -> bool:
         """
-        True quando o modelo foi treinado com o vetor holístico.
+        True quando o detector quer o frame inteiro em vez de uma mão por vez.
 
-        A dimensão de entrada distingue os formatos: 42 features é o vetor
-        legado só-mãos; o holístico soma mãos + pose + face. O DetectorManager
-        usa isso para entregar o frame inteiro em vez de uma mão por vez.
+        Vale para o modelo de forma da mão (que escolhe entre as mãos do frame)
+        e para o holístico antigo, reconhecido pela dimensão de entrada: 42
+        features é o vetor legado só-mãos; o holístico soma mãos + pose + face.
         """
         from src.data_collection import holistic_features as hf
 
+        if self.uses_hand_shape:
+            return True
         n_in = _n_features_in(self.model.model)
         return n_in == hf.HANDS_FEATURES + hf.POSE_FEATURES + hf.FACE_FEATURES
+
+    def _predict_hand_shape(self, frame):
+        """
+        Prediz (label, confiança) pela forma de cada mão do frame.
+
+        Cada mão é classificada sozinha e vence a de maior confiança. Corpo,
+        rosto e posição na tela não entram: é isso que faz o modelo valer para
+        qualquer pessoa, e não só para quem gravou as amostras.
+        """
+        from src.data_collection import hand_shape_features as hs
+
+        hands = getattr(frame, "hands", None)
+        if hands is None:
+            hands = [frame]  # recebeu uma mão solta (lista de landmarks)
+        aspect = getattr(frame, "aspect", None)
+
+        valid = [hand for hand in hands if hand is not None and len(hand) >= hs.N_POINTS]
+        if not valid:
+            return None, 0.0
+
+        features = [hs.hand_features(hand, aspect) for hand in valid]
+        probs = self.model.model.predict_proba(features)
+        row, col = np.unravel_index(int(np.argmax(probs)), probs.shape)
+        return self.model.model.classes_[col], float(probs[row, col])
 
     def _predict_holistic(self, frame, hf):
         """
@@ -253,6 +291,10 @@ class MLDetector(BaseDetector):
 
         if not landmarks:
             return None, 0.0
+
+        if self.uses_hand_shape:
+            label, confidence = self._predict_hand_shape(landmarks)
+            return (None, 0.0) if confidence < self.threshold else (label, confidence)
 
         if self.expects_holistic_frame:
             from src.data_collection import holistic_features as hf
