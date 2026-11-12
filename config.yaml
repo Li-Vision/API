@@ -69,8 +69,13 @@ dynamic_ml:
   # Nessa volta o buffer e' limpo e os primeiros reentry_skip_frames frames sao
   # descartados, porque a chegada da mao passa do portao de movimento e o modelo
   # le a mao aberta como OI. 0 desliga.
-  reentry_gap_seconds: 0.5
-  reentry_skip_frames: 6
+  #
+  # O aparelho entrega ~3,4 frames/s (um frame a cada ~300 ms, 10% acima de
+  # 444 ms no log de 12/11): com gap de 0.5 s um frame lento ja' contava como
+  # reentrada e zerava a janela. 1.0 s da' folga; 3 frames descartados (~0,9 s)
+  # em vez de 6 (~1,8 s) encurta a espera ate' o primeiro reconhecimento.
+  reentry_gap_seconds: 1.0
+  reentry_skip_frames: 3
 
 
 # ---------------------------------------------------
