@@ -117,6 +117,12 @@ class DetectorManager:
         # Cooldown ativo — retorna último gesto estável
         # -------------------------------------------
         if self.last_cooldown:
+            # Os detectores de sequencia continuam recebendo os frames: a janela
+            # deles (15 frames, ~4,5 s no aparelho) precisa ser continua. Sem
+            # isto, no modo hibrido cada letra estavel abria 1 s de buraco na
+            # janela e, na volta, o intervalo era lido como "a mao saiu e
+            # voltou" (reentry_gap_seconds), zerando o buffer de novo.
+            self._feed_sequence_detectors(frame)
             return self.last_label, self.last_score
 
         if not hands:
@@ -127,6 +133,7 @@ class DetectorManager:
 
         best_label = None
         best_score = 0.0
+        best_det = None
 
         # -------------------------------------------
         # Executa detectores
@@ -165,6 +172,7 @@ class DetectorManager:
                 if label and score > best_score:
                     best_label = label
                     best_score = score
+                    best_det = det
                     self.last_winner = type(det).__name__
 
             except Exception as e:
@@ -204,12 +212,30 @@ class DetectorManager:
             self.cooldown_until = now + self.cooldown_seconds
             self.history.clear()
 
-            # Evita o "ghosting" de gestos dinâmicos: limpa os buffers para 
-            # não ficarem "presos" prevendo a mesma sequência de frames passados
-            for det in self.detectors:
-                if self._is_sequence_detector(det):
-                    det.buffer.clear()
+            # Evita o "ghosting" de gestos dinâmicos: limpa os buffers para
+            # não ficarem "presos" prevendo a mesma sequência de frames passados.
+            # Só quando quem venceu foi um detector de sequência: uma letra
+            # estática confirmada não diz nada sobre a janela do dinâmico, e
+            # limpar aqui impedia a janela de encher no modo híbrido (o estático
+            # confirma uma letra a cada ~3 frames; a janela precisa de 15).
+            if best_det is not None and self._is_sequence_detector(best_det):
+                for det in self.detectors:
+                    if self._is_sequence_detector(det):
+                        det.buffer.clear()
 
             return label, best_score
 
         return self.last_label, self.last_score
+
+    def _feed_sequence_detectors(self, frame):
+        """Entrega o frame aos detectores de sequência, descartando o resultado."""
+        for det in self.detectors:
+            if not self._is_sequence_detector(det):
+                continue
+            try:
+                det.detect(frame)
+            except Exception as e:
+                logger.warning(
+                    "[DetectorManager] Erro em detector %s: %s",
+                    type(det).__name__, e
+                )
