@@ -2,6 +2,8 @@ from collections import deque
 import logging
 import time
 
+from src.diagnostics import finger_crossing
+
 logger = logging.getLogger(__name__)
 
 
@@ -22,6 +24,7 @@ class DetectorManager:
     # Valores padrao no nivel da classe: instancias criadas sem __init__ (testes)
     # continuam funcionando.
     cooldown_until = 0.0
+    last_cross = []
     last_hit = 0.0
     cooldown_seconds = 1.0
     hold_seconds = 0.5
@@ -65,6 +68,7 @@ class DetectorManager:
         self.last_trace = []
         self.last_winner = None
         self.last_cooldown = False
+        self.last_cross = []
 
     def debug_info(self) -> dict:
         """Resumo serializavel da ultima decisao (para log/diagnostico)."""
@@ -72,6 +76,7 @@ class DetectorManager:
             "winner": self.last_winner,
             "cooldown": self.last_cooldown,
             "trace": self.last_trace,
+            "cross": self.last_cross,
         }
 
     def _miss(self):
@@ -110,6 +115,8 @@ class DetectorManager:
 
         self.last_trace = []
         self.last_winner = None
+        # Diagnostico de dedos cruzados (so' mede; nao influencia a decisao).
+        self.last_cross = finger_crossing.summarize(hands)
         now = self._clock()
         self.last_cooldown = now < self.cooldown_until
 
