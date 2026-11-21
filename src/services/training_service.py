@@ -450,8 +450,12 @@ class TrainingService:
         job_id = self.create_job(model_id, dataset_name_grouped)
         
         try:
+            # Cada amostra dinamica tem window x frame (15 x 269 ~ 4 mil
+            # floats): uma pagina de 1000 linhas estourava o statement timeout
+            # do Supabase (57014) com 728 amostras. Paginas pequenas.
             data = fetch_all(
-                lambda: supabase.table("samples").select("label, features").in_("dataset_id", dataset_ids)
+                lambda: supabase.table("samples").select("label, features").in_("dataset_id", dataset_ids),
+                page_size=100,
             )
             
             if len(data) < 2:
