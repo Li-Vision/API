@@ -110,6 +110,7 @@ class UserSession:
             stability_frames=config["detection"].get("stability_frames", 3),
             cooldown_seconds=config["detection"].get("cooldown_seconds", 1.0),
             hold_seconds=config["detection"].get("hold_seconds", 0.5),
+            hybrid_motion_split=config["detection"].get("hybrid_motion_split"),
         )
 
     def _create_static_detectors(self, config) -> list:

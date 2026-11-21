@@ -28,6 +28,7 @@ class DetectorManager:
     last_hit = 0.0
     cooldown_seconds = 1.0
     hold_seconds = 0.5
+    hybrid_motion_split = None
     _clock = staticmethod(time.monotonic)
 
     def __init__(
@@ -38,9 +39,24 @@ class DetectorManager:
         cooldown_seconds=1.0,
         hold_seconds=0.5,
         clock=None,
+        hybrid_motion_split=None,
     ):
         self.detectors = detectors
         self.min_score = min_score
+
+        # Arbitragem estatico x dinamico no modo hibrido, pelo movimento da
+        # janela do dinamico (holistic_features.window_motion). Os dois modelos
+        # saturam o softmax em ~1.0, entao "maior score vence" nao separa nada:
+        # nos logs de 15-20/11 o estatico vencia o empate em 84 de 118 frames
+        # em que o dinamico tinha label (SIM real perdia para A/N), e com a
+        # mao parada o dinamico lia a pose como OI/SIM/TUDO BEM (motion
+        # 0.0015-0.0079) e roubava a letra quando o estatico oscilava.
+        #   motion >= split -> o dinamico tem prioridade sobre o estatico
+        #   motion <  split -> janela quase parada: a pose e' do estatico e o
+        #                      label do dinamico e' descartado
+        # None desliga (comportamento antigo: maior score vence). So' atua
+        # quando ha detectores dos dois tipos.
+        self.hybrid_motion_split = hybrid_motion_split
 
         # estabilização temporal
         self.history = deque(maxlen=stability_frames)
@@ -138,16 +154,16 @@ class DetectorManager:
             self.last_score = 0.0
             return None, 0.0
 
-        best_label = None
-        best_score = 0.0
-        best_det = None
+        # (det, label, score, is_sequence, trace_entry) de quem respondeu
+        candidates = []
 
         # -------------------------------------------
         # Executa detectores
         # -------------------------------------------
         for det in self.detectors:
             try:
-                if self._is_sequence_detector(det) or getattr(det, "expects_holistic_frame", False):
+                is_seq = self._is_sequence_detector(det)
+                if is_seq or getattr(det, "expects_holistic_frame", False):
                     # Detectores de sequência e estáticos holísticos processam o
                     # frame inteiro (mãos + pose + face). Detectores que só
                     # entendem mãos ignoram os canais extras.
@@ -176,11 +192,8 @@ class DetectorManager:
                     entry["motion"] = round(float(motion), 5)
                 self.last_trace.append(entry)
 
-                if label and score > best_score:
-                    best_label = label
-                    best_score = score
-                    best_det = det
-                    self.last_winner = type(det).__name__
+                if label:
+                    candidates.append((det, label, score, is_seq, entry))
 
             except Exception as e:
                 logger.warning(
@@ -188,6 +201,10 @@ class DetectorManager:
                     type(det).__name__, e
                 )
                 continue
+
+        best_det, best_label, best_score = self._pick_best(candidates)
+        if best_det is not None:
+            self.last_winner = type(best_det).__name__
 
         # -------------------------------------------
         # Threshold mínimo
@@ -233,6 +250,41 @@ class DetectorManager:
             return label, best_score
 
         return self.last_label, self.last_score
+
+    def _pick_best(self, candidates):
+        """
+        Escolhe (det, label, score) entre os detectores que deram label.
+
+        Sem `hybrid_motion_split` (ou sem detectores dos dois tipos) vence o
+        maior score. No hibrido, o movimento da janela decide quem fala: ver o
+        comentario em __init__.
+        """
+        split = self.hybrid_motion_split
+        has_seq = any(self._is_sequence_detector(d) for d in self.detectors)
+        has_static = any(not self._is_sequence_detector(d) for d in self.detectors)
+
+        if split is not None and has_seq and has_static:
+            dynamic = []
+            for cand in candidates:
+                det, _, _, is_seq, entry = cand
+                if not is_seq:
+                    continue
+                motion = getattr(det, "last_motion", None)
+                if motion is not None and motion >= split:
+                    dynamic.append(cand)
+                else:
+                    entry["gated"] = "low_motion"  # visivel no log do app
+            if dynamic:
+                pool = dynamic
+            else:
+                pool = [c for c in candidates if not c[3]]
+        else:
+            pool = candidates
+
+        if not pool:
+            return None, None, 0.0
+        det, label, score, _, _ = max(pool, key=lambda c: c[2])
+        return det, label, score
 
     def _feed_sequence_detectors(self, frame):
         """Entrega o frame aos detectores de sequência, descartando o resultado."""
