@@ -21,6 +21,14 @@ detection:
   cooldown_seconds: 1.0
   hold_seconds: 0.5
 
+  # Modo hibrido: movimento da janela do dinamico (campo "motion" do log) que
+  # separa pose de gesto. Acima, o dinamico tem prioridade sobre o estatico;
+  # abaixo, o label do dinamico e' descartado (trace marca "gated").
+  # Logs de 15-20/11: dinamicos reais (SIM/OI/TUDO BEM/OBRIGADO) >= 0.0098;
+  # falsos sobre letras paradas (OI em B/D/E/F, SIM em A/C) <= 0.0079.
+  # Remova a chave para voltar ao "maior score vence".
+  hybrid_motion_split: 0.008
+
 
 # ---------------------------------------------------
 # DETECTORES BASEADOS EM REGRAS
