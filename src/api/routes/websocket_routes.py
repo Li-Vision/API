@@ -16,6 +16,7 @@ Erros retornados como:
   {"gesture": null, "confidence": 0.0, "error": "mensagem"}
 """
 
+import asyncio
 import json
 import traceback
 import numpy as np
@@ -28,6 +29,29 @@ from src.api.user_session import UserSession
 from src.api.holistic import MockLandmark, HolisticFrame, parse_input
 
 router = APIRouter(tags=["WebSocket"])
+
+
+async def _push_collect_result(websocket: WebSocket, ticket_id: str):
+    """
+    Espera a validacao de uma sequencia e avisa o app:
+      {"action": "collect_result", "ticket_id", "status", "reasons", "sequences", ...}
+    `ok` e' sempre True aqui — a gravacao ja' terminou; o app decide como
+    mostrar suspeita/rejeicao.
+    """
+    from src.services.collection_queue import collection_queue
+
+    ticket = await asyncio.to_thread(collection_queue.wait, ticket_id, 60.0)
+    if not ticket:
+        return
+    try:
+        await websocket.send_json({
+            **ticket,
+            "ok": True,
+            "action": "collect_result",
+            "sequences": ticket.get("sample_count"),
+        })
+    except Exception:
+        pass  # cliente ja' desconectou
 
 
 async def handle_action(websocket: WebSocket, session: UserSession, payload: dict):
@@ -206,6 +230,10 @@ async def websocket_detect(websocket: WebSocket):
                     if session.collecting and session.collection_service.dynamic_session:
                         res = session.collection_service.collect_dynamic_frame(frame)
                         await websocket.send_json(res)
+                        if res.get("ticket_id"):
+                            # Sequencia enfileirada: o veredito chega depois,
+                            # sem segurar o loop de frames.
+                            asyncio.create_task(_push_collect_result(websocket, res["ticket_id"]))
                         continue
 
                     # ----- INFERÊNCIA NORMAL -----

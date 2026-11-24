@@ -6,8 +6,26 @@ from src.core.retry import retry_transient
 from src.data_collection.static_collector import StaticCollector
 from src.data_collection import holistic_features as hf
 from src.api.holistic import HolisticFrame
+from src.services.collection_queue import CollectJob, collection_queue
+from src.validation import sample_validator as sv
 
 logger = logging.getLogger(__name__)
+
+# Frames por sequencia dinamica (janela do modelo).
+DYNAMIC_WINDOW = 15
+
+# nome -> (id, schema, guardado_em). Compartilhado por todas as sessoes: sem
+# ele cada captura pagava 2 consultas ao Supabase so' para achar o dataset.
+_DATASET_CACHE: Dict[str, tuple] = {}
+_DATASET_CACHE_TTL = 120.0
+
+
+def _forget_dataset(dataset_id: Optional[str] = None) -> None:
+    for name, (ds_id, _, _) in list(_DATASET_CACHE.items()):
+        if dataset_id is None or ds_id == dataset_id:
+            _DATASET_CACHE.pop(name, None)
+    collection_queue.invalidate(dataset_id)
+
 
 class CollectionService:
     def __init__(self):
@@ -17,20 +35,38 @@ class CollectionService:
 
     def _get_or_create_dataset(self, name: str, ds_type: str,
                                feature_schema: str = hf.DEFAULT_SCHEMA) -> str:
+        import time
         name = name.upper()
+        cached = _DATASET_CACHE.get(name)
+        if cached and time.time() - cached[2] < _DATASET_CACHE_TTL:
+            return cached[0]
+
         res = supabase.table("datasets").select("id").eq("name", name).execute()
         if len(res.data) > 0:
-            return res.data[0]["id"]
-
-        ins_res = supabase.table("datasets").insert({
-            "name": name,
-            "type": ds_type,
-            "feature_schema": feature_schema,
-        }).execute()
-        return ins_res.data[0]["id"]
+            ds_id = res.data[0]["id"]
+        else:
+            ins_res = supabase.table("datasets").insert({
+                "name": name,
+                "type": ds_type,
+                "feature_schema": feature_schema,
+            }).execute()
+            ds_id = ins_res.data[0]["id"]
+        _DATASET_CACHE[name] = (ds_id, None, time.time())
+        return ds_id
 
     def _get_dataset_schema(self, dataset_id: str) -> Optional[str]:
         """Schema de um dataset existente, ou None se for anterior à coluna."""
+        import time
+        for name, (ds_id, schema, at) in _DATASET_CACHE.items():
+            if ds_id == dataset_id and schema and time.time() - at < _DATASET_CACHE_TTL:
+                return schema
+        schema = self._read_dataset_schema(dataset_id)
+        for name, (ds_id, _, at) in list(_DATASET_CACHE.items()):
+            if ds_id == dataset_id:
+                _DATASET_CACHE[name] = (ds_id, schema, at)
+        return schema
+
+    def _read_dataset_schema(self, dataset_id: str) -> Optional[str]:
         try:
             res = supabase.table("datasets").select("feature_schema").eq("id", dataset_id).execute()
             if res.data:
@@ -76,29 +112,64 @@ class CollectionService:
                 }
             use_holistic = wants_holistic
 
+            hand_landmarks = frame.hands[0] if frame and frame.hands else hand
             if use_holistic:
                 features = hf.build_frame_vector(frame, hf.SCHEMA_HOLISTIC_V1)
             else:
-                hand_landmarks = frame.hands[0] if frame and frame.hands else hand
                 features = self.static_collector.landmarks_to_features(hand_landmarks)
 
-            insert_data = {
-                "dataset_id": dataset_id,
-                "label": label,
-                "features": features
-            }
-            if user_id:
-                insert_data["user_id"] = user_id
-                
-            retry_transient(lambda: supabase.table("samples").insert(insert_data).execute())
-            
-            res = retry_transient(lambda: supabase.table("samples").select("id", count="exact").eq("dataset_id", dataset_id).eq("label", label).execute())
-            count = res.count if hasattr(res, 'count') and res.count is not None else len(res.data)
-            
-            return {"ok": True, "sample_count": count}
+            # Integridade na hora (sem rede): amostra corrompida nem entra na fila.
+            raw_issues = sv.check_hand_landmarks(hand_landmarks)
+            issues = raw_issues + sv.check_integrity(features, sv.KIND_STATIC)
+            if any(i.severity == "error" for i in issues):
+                return self._rejected(label, dataset_id, issues)
+
+            return self._enqueue(CollectJob(
+                dataset_id=dataset_id, label=label, kind=sv.KIND_STATIC,
+                features=features, user_id=user_id,
+                # A borda da camera so' da' para ver nos landmarks crus.
+                extra_issues=[i for i in raw_issues if i.severity != "error"],
+            ), count_key="sample_count")
         except Exception as e:
             logger.error(f"[collect_static] Erro: {str(e)}")
             return {"ok": False, "error": f"Backend Error: {str(e)}"}
+
+    def _rejected(self, label: str, dataset_id: str, issues) -> dict:
+        """Resposta de amostra corrompida: `ok: False` faz o app mostrar o motivo."""
+        errors = [i for i in issues if i.severity == "error"]
+        logger.info("[collect] amostra rejeitada %s/%s: %s", dataset_id, label,
+                    ", ".join(i.code for i in errors))
+        return {
+            "ok": False,
+            "status": sv.STATUS_REJECTED,
+            "error": "Amostra descartada: " + "; ".join(i.message for i in errors),
+            "reasons": [i.to_dict() for i in issues],
+        }
+
+    def _enqueue(self, job: CollectJob, count_key: str) -> dict:
+        """Manda para a fila de validacao e responde na hora com o ticket."""
+        ticket = collection_queue.submit(job)
+        if ticket.get("status") == "error":
+            return {"ok": False, "error": ticket.get("error")}
+
+        count = collection_queue.known_count(job.dataset_id, job.label)
+        if count is None:
+            # 1a captura do dataset neste processo: a referencia ainda nao foi
+            # carregada pelo worker. Uma contagem simples mantem o contador do
+            # app certo sem esperar a validacao.
+            res = retry_transient(lambda: supabase.table("samples").select("id", count="exact")
+                                  .eq("dataset_id", job.dataset_id).eq("label", job.label)
+                                  .limit(1).execute())
+            count = res.count if getattr(res, "count", None) is not None else len(res.data)
+
+        return {
+            "ok": True,
+            "queued": True,
+            "status": ticket["status"],
+            "ticket_id": ticket["ticket_id"],
+            # Aceitas ate' agora; a desta captura entra quando o ticket fechar.
+            count_key: count,
+        }
 
     def collect_dynamic_start(self, label: str, dataset_name: str, user_id: str = None) -> dict:
         # O dataset é criado de forma preguiçosa no primeiro frame, quando o
@@ -154,7 +225,7 @@ class CollectionService:
         features = hf.build_frame_vector(frame, schema)
         self.dynamic_buffer.append(features)
 
-        if len(self.dynamic_buffer) >= 15:
+        if len(self.dynamic_buffer) >= DYNAMIC_WINDOW:
             return self.collect_dynamic_save()
 
         return {
@@ -166,33 +237,27 @@ class CollectionService:
 
     def collect_dynamic_save(self) -> dict:
         try:
-            if not self.dynamic_session or len(self.dynamic_buffer) < 15:
+            if not self.dynamic_session or len(self.dynamic_buffer) < DYNAMIC_WINDOW:
                 return {"ok": False, "error": "Incomplete buffer or no session"}
-                
+
             dataset_id = self.dynamic_session["dataset_id"]
             label = self.dynamic_session["label"]
             user_id = self.dynamic_session.get("user_id")
-            
-            # Flatten the 15 frames into a single features array
+
+            # Achata os 15 frames num unico vetor (formato gravado em `samples`).
             flattened_features = []
             for frame in self.dynamic_buffer:
                 flattened_features.extend(frame)
-                
-            insert_data = {
-                "dataset_id": dataset_id,
-                "label": label,
-                "features": flattened_features
-            }
-            if user_id:
-                insert_data["user_id"] = user_id
-                
-            supabase.table("samples").insert(insert_data).execute()
-            
             self.dynamic_buffer = []
-            
-            res = supabase.table("samples").select("id").eq("dataset_id", dataset_id).eq("label", label).execute()
-            
-            return {"ok": True, "sequences": len(res.data)}
+
+            issues = sv.check_integrity(flattened_features, sv.KIND_DYNAMIC, window=DYNAMIC_WINDOW)
+            if any(i.severity == "error" for i in issues):
+                return self._rejected(label, dataset_id, issues)
+
+            return self._enqueue(CollectJob(
+                dataset_id=dataset_id, label=label, kind=sv.KIND_DYNAMIC,
+                features=flattened_features, user_id=user_id, window=DYNAMIC_WINDOW,
+            ), count_key="sequences")
         except Exception as e:
             logger.error(f"[collect_dynamic_save] Erro: {str(e)}")
             return {"ok": False, "error": f"Backend Error: {str(e)}"}
@@ -259,6 +324,7 @@ class CollectionService:
             supabase.table("samples").delete().eq("dataset_id", dataset_id).execute()
             # Depois deleta o dataset
             res = supabase.table("datasets").delete().eq("id", dataset_id).execute()
+            _forget_dataset(dataset_id)
             logger.info("[delete_dataset] Dataset %s deletado. Resultado: %s", dataset_id, res.data)
             return {"ok": True}
         except Exception as e:
@@ -279,6 +345,7 @@ class CollectionService:
                 return {"ok": True, "deleted": 0, "message": "Nenhuma amostra encontrada para este gesto."}
             
             res = supabase.table("samples").delete().eq("dataset_id", dataset_id).eq("label", target_label).execute()
+            collection_queue.invalidate(dataset_id)
             deleted_count = len(res.data) if res.data else 0
             logger.info("[delete_label] Deletadas %d amostras", deleted_count)
             return {"ok": True, "deleted": deleted_count}
@@ -289,6 +356,7 @@ class CollectionService:
     def rename_dataset(self, dataset_id: str, new_name: str) -> dict:
         try:
             supabase.table("datasets").update({"name": new_name.upper()}).eq("id", dataset_id).execute()
+            _forget_dataset(dataset_id)
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -296,6 +364,103 @@ class CollectionService:
     def rename_label(self, dataset_id: str, old_label: str, new_label: str) -> dict:
         try:
             supabase.table("samples").update({"label": new_label.upper()}).eq("dataset_id", dataset_id).eq("label", old_label.upper()).execute()
+            collection_queue.invalidate(dataset_id)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    # ------------------------------------------------------------------
+    # Validacao assincrona / quarentena
+    # ------------------------------------------------------------------
+    def get_ticket(self, ticket_id: str) -> dict:
+        ticket = collection_queue.get(ticket_id)
+        if ticket is None:
+            return {"ok": False, "error": "Ticket não encontrado (expirado ou de outro servidor)."}
+        return {"ok": True, **ticket}
+
+    def list_quarantine(self, dataset_id: Optional[str] = None, label: Optional[str] = None) -> dict:
+        from src.services.collection_queue import QUARANTINE_TABLE
+        try:
+            def query():
+                q = supabase.table(QUARANTINE_TABLE).select(
+                    "id, dataset_id, label, kind, user_id, reasons, scores, created_at")
+                if dataset_id:
+                    q = q.eq("dataset_id", dataset_id)
+                if label:
+                    q = q.eq("label", label.upper())
+                return q
+            return {"ok": True, "items": fetch_all(query)}
+        except Exception as e:
+            return {"ok": False, "error": f"Quarentena indisponível (migração aplicada?): {e}"}
+
+    def get_quarantine_item(self, item_id: str) -> dict:
+        """Item completo, com as features (para desenhar o gesto na revisao)."""
+        from src.services.collection_queue import QUARANTINE_TABLE
+        try:
+            res = supabase.table(QUARANTINE_TABLE).select("*").eq("id", item_id).execute()
+            if not res.data:
+                return {"ok": False, "error": "Item não encontrado na quarentena."}
+            return {"ok": True, "item": res.data[0]}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def label_example(self, dataset_id: str, label: str, max_rows: int = 60) -> dict:
+        """
+        Uma amostra tipica do sinal (medoide das mais recentes), para o admin
+        comparar com a amostra em revisao.
+        """
+        try:
+            ds = supabase.table("datasets").select("type").eq("id", dataset_id).execute().data
+            kind = sv.KIND_DYNAMIC if ds and ds[0]["type"] == "dynamic" else sv.KIND_STATIC
+            rows = (supabase.table("samples").select("features")
+                    .eq("dataset_id", dataset_id).eq("label", label.upper())
+                    .order("created_at", desc=True).limit(max_rows).execute().data)
+            if not rows:
+                return {"ok": True, "features": None, "count": 0}
+            idx = sv.medoid_index([r["features"] for r in rows], kind)
+            return {
+                "ok": True,
+                "features": rows[idx]["features"] if idx is not None else None,
+                "count": len(rows),
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def approve_quarantine(self, item_id: str, label: Optional[str] = None) -> dict:
+        """
+        Admin confirma que a amostra e' boa: ela vai para `samples` (entra no
+        treino). `label` corrige o rotulo — o caso comum de quem gravou um
+        sinal com o gesto de outro.
+        """
+        from src.services.collection_queue import QUARANTINE_TABLE
+        try:
+            res = supabase.table(QUARANTINE_TABLE).select(
+                "id, dataset_id, label, features, user_id").eq("id", item_id).execute()
+            if not res.data:
+                return {"ok": False, "error": "Item não encontrado na quarentena."}
+            item = res.data[0]
+            row = {k: item[k] for k in ("dataset_id", "label", "features") }
+            new_label = (label or "").strip().upper()
+            if new_label and new_label != item["label"]:
+                logger.info("[approve_quarantine] %s: rotulo corrigido %s -> %s",
+                            item_id, item["label"], new_label)
+                row["label"] = new_label
+            if item.get("user_id"):
+                row["user_id"] = item["user_id"]
+            # Insere ANTES de apagar: se a segunda etapa falhar, sobra uma copia
+            # na quarentena, nunca a amostra perdida.
+            retry_transient(lambda: supabase.table("samples").insert(row).execute())
+            supabase.table(QUARANTINE_TABLE).delete().eq("id", item_id).execute()
+            collection_queue.invalidate(item["dataset_id"])
+            return {"ok": True, "label": row["label"]}
+        except Exception as e:
+            logger.error("[approve_quarantine] Erro: %s", e)
+            return {"ok": False, "error": str(e)}
+
+    def discard_quarantine(self, item_id: str) -> dict:
+        from src.services.collection_queue import QUARANTINE_TABLE
+        try:
+            supabase.table(QUARANTINE_TABLE).delete().eq("id", item_id).execute()
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}

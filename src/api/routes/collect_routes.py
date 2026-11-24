@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from src.api.routes.auth_routes import verify_token
 
 class PointModel(BaseModel):
@@ -30,7 +30,15 @@ def get_service():
     return state.collection_service
 
 @router.post("/static")
-async def collect_static(payload: StaticPayload, user: dict = Depends(verify_token)):
+def collect_static(payload: StaticPayload, user: dict = Depends(verify_token)):
+    # `def` (nao async): o servico faz chamadas sincronas ao Supabase; o
+    # FastAPI roda rotas `def` num threadpool, sem travar o event loop (e o
+    # WebSocket de quem esta' coletando ao mesmo tempo).
+    #
+    # Resposta: {"ok": True, "queued": True, "ticket_id", "sample_count"}. A
+    # validacao (semelhanca com o dataset + modelo) roda em background; o
+    # veredito sai em GET /collect/tickets/{ticket_id}. Amostra corrompida
+    # volta na hora com ok=False.
     from src.api.holistic import parse_input
 
     raw = payload.landmarks
@@ -53,6 +61,19 @@ async def collect_dynamic_start(payload: DynamicStartPayload, user: dict = Depen
 @router.post("/dynamic/stop")
 async def collect_dynamic_stop():
     return get_service().collect_dynamic_stop()
+
+@router.get("/tickets/{ticket_id}")
+def get_ticket(ticket_id: str, wait: float = 0.0, user: dict = Depends(verify_token)):
+    """
+    Veredito da validacao de uma amostra enfileirada.
+
+    `status`: queued | processing | accepted | suspect | rejected | error.
+    `wait` (s, ate' 10): segura a resposta ate' o veredito sair (long-poll).
+    """
+    if wait > 0:
+        from src.services.collection_queue import collection_queue
+        collection_queue.wait(ticket_id, timeout=min(wait, 10.0))
+    return get_service().get_ticket(ticket_id)
 
 @router.get("/datasets")
 async def get_datasets():
@@ -92,3 +113,32 @@ async def delete_label(dataset_id: str, label: str, admin: dict = Depends(requir
 @router.put("/datasets/{dataset_id}/labels/{label}")
 async def rename_label(dataset_id: str, label: str, payload: RenameLabelPayload, admin: dict = Depends(require_admin)):
     return get_service().rename_label(dataset_id, label, payload.new_label)
+
+# ---- Quarentena: amostras suspeitas, fora do treino ate' revisao ----------
+
+@router.get("/quarantine")
+def list_quarantine(dataset_id: Optional[str] = None, label: Optional[str] = None,
+                    admin: dict = Depends(require_admin)):
+    return get_service().list_quarantine(dataset_id, label)
+
+class ApproveQuarantinePayload(BaseModel):
+    # Rotulo corrigido; vazio/ausente mantem o rotulo gravado.
+    label: Optional[str] = None
+
+@router.get("/quarantine/{item_id}")
+def get_quarantine_item(item_id: str, admin: dict = Depends(require_admin)):
+    return get_service().get_quarantine_item(item_id)
+
+@router.post("/quarantine/{item_id}/approve")
+def approve_quarantine(item_id: str, payload: Optional[ApproveQuarantinePayload] = None,
+                       admin: dict = Depends(require_admin)):
+    return get_service().approve_quarantine(item_id, payload.label if payload else None)
+
+@router.get("/datasets/{dataset_id}/labels/{label}/example")
+def label_example(dataset_id: str, label: str, admin: dict = Depends(require_admin)):
+    """Amostra tipica de um sinal, para comparar na revisao da quarentena."""
+    return get_service().label_example(dataset_id, label)
+
+@router.delete("/quarantine/{item_id}")
+def discard_quarantine(item_id: str, admin: dict = Depends(require_admin)):
+    return get_service().discard_quarantine(item_id)
