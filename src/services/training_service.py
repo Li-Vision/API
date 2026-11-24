@@ -56,6 +56,30 @@ def _oversample_minorities(X, y, floor=150, noise=0.02, seed=42):
         pd.concat(parts_y, ignore_index=True),
     )
 
+def _drop_corrupted(df, kind: str):
+    """
+    Tira do treino as amostras fisicamente impossiveis (NaN, mao colapsada,
+    sequencia congelada...) — mesma regua da validacao na coleta. Protege o
+    modelo do que foi gravado antes da validacao existir.
+
+    `bad_size` fica de fora de proposito: tamanho incomum pode ser um formato
+    legado valido, e misturas de formato ja' tem tratamento proprio abaixo.
+    """
+    from src.validation import sample_validator as sv
+
+    def corrupted(features) -> bool:
+        return any(i.severity == "error" and i.code != "bad_size"
+                   for i in sv.check_integrity(features, kind))
+
+    mask = df["features"].map(corrupted)
+    if mask.any():
+        logger.warning("[Train] %d amostra(s) corrompida(s) fora do treino %s: %s "
+                       "(rode scripts/audit_dataset.py para detalhes)",
+                       int(mask.sum()), kind, df.loc[mask, "label"].value_counts().to_dict())
+        df = df.loc[~mask].reset_index(drop=True)
+    return df
+
+
 def _storage_safe(name: str) -> str:
     """Remove acentos/caracteres invalidos para uso como chave no Supabase Storage."""
     ascii_name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
@@ -173,7 +197,10 @@ class TrainingService:
             if len(data) < 2:
                 raise ValueError(f"Amostras insuficientes para treinar modelo {model_type} (minimo 2).")
 
-            df = pd.DataFrame(data)
+            df = _drop_corrupted(pd.DataFrame(data), "static")
+            if len(df) < 2:
+                raise ValueError("Amostras validas insuficientes apos descartar as corrompidas.")
+            data = df.to_dict("records")
 
             # Amostras hands_v1 (42) e holistic_v1 convivendo no mesmo treino
             # virariam NaN no DataFrame e o erro só apareceria no fit, sem
@@ -461,7 +488,9 @@ class TrainingService:
             if len(data) < 2:
                 raise ValueError(f"Amostras insuficientes para treinar modelo {model_type} (minimo 2).")
 
-            df = pd.DataFrame(data)
+            df = _drop_corrupted(pd.DataFrame(data), "dynamic")
+            if len(df) < 2:
+                raise ValueError("Amostras validas insuficientes apos descartar as corrompidas.")
 
             # ── Descarta amostras de tamanho diferente ──────────────
             # Um dataset pode misturar coletas em "so maos" (15 x 130) e
