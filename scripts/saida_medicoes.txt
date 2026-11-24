@@ -1,0 +1,80 @@
+Medicao em 2026-11-17 10:16:48  n=10
+
+== E1/E2  WebSocket  wss://li-vision-api.onrender.com/ws/detect?mode=hybrid&use_rules=false
+  conexao aberta em 1.99 s (>20 s indica cold start do Render)
+
+  esquema holistic_v1 (1 mao)  respostas com erro/timeout: 0
+  mensagem enviada (payload)         n=10  min=   40356.0  media=   40385.2  max=   40427.0 B
+    + cabecalho WS (mascarado)       n=10  min=   40364.0  media=   40393.2  max=   40435.0 B
+  resposta recebida (payload)        n=10  min=    1771.0  media=    1781.3  max=    1797.0 B
+    + cabecalho WS                   n=10  min=    1775.0  media=    1785.3  max=    1801.0 B
+  RTT envio -> resposta              n=10  min=     259.7  media=     374.0  max=     532.5 ms
+  exemplo de resposta: {"gesture":null,"confidence":0.0,"mode":"hybrid","landmarks":[[{"x":0.7224541306495667,"y":0.3496801555156708,"z":-0.02406926266849041},{"x":0.9320790767669678,"y":0.03298963978886604,"z":-0.038564275950193405},{"x":0.5255408883094788,"y":0.6233890056610107,"z":-0.09694921970367432},{"x":0.365012109
+
+  esquema hands_v1 (1 mao)  respostas com erro/timeout: 0
+  mensagem enviada (payload)         n=10  min=    1549.0  media=    1553.3  max=    1558.0 B
+    + cabecalho WS (mascarado)       n=10  min=    1557.0  media=    1561.3  max=    1566.0 B
+  resposta recebida (payload)        n=10  min=    1773.0  media=    1792.8  max=    1816.0 B
+    + cabecalho WS                   n=10  min=    1777.0  media=    1796.8  max=    1820.0 B
+  RTT envio -> resposta              n=10  min=     226.9  media=     416.3  max=     667.9 ms
+  exemplo de resposta: {"gesture":null,"confidence":0.0,"mode":"hybrid","landmarks":[[{"x":0.9220839142799377,"y":0.8549526333808899,"z":-0.07024802267551422},{"x":0.29421451687812805,"y":0.5008389949798584,"z":-0.09397338330745697},{"x":0.9347624182701111,"y":0.22286054491996765,"z":-0.0965561494231224},{"x":0.9474371075
+
+== E5  corpo do INSERT em samples (PostgREST)
+  features por frame (holistic_v1): 269 valores
+  coleta estatica (1 frame)          n=10  min=    4500.0  media=    4516.1  max=    4542.0 B
+  coleta dinamica (15 frames)        n=10  min=   65955.0  media=   65998.0  max=   66061.0 B
+  obs.: cabecalhos HTTP do PostgREST nao incluidos (medir no painel do Supabase).
+
+== E6  Supabase Storage / banco (somente leitura)
+  static/LIBRAS_BR2_group.joblib                               2564291 B
+  static/LIBRAS-HOLISTICOV2_group.joblib                       735312 B
+  dynamic/LIBRAS-HOLISTICOV2_group.pt                          856869 B
+  tamanho do modelo                  n=3   min=  735312.0  media= 1385490.7  max= 2564291.0 B
+  total no bucket 'models': 4156472 B  (3 arquivos)
+  linhas em samples agora: 8395
+
+== E3  REST  https://li-vision-api.onrender.com  (tamanho conta cabecalhos; resposta decodificada)
+
+  POST /auth/login  (HTTP 200)
+  requisicao                         n=10  min=     263.0  media=     263.0  max=     263.0 B
+  resposta                           n=10  min=    1505.0  media=    1505.0  max=    1505.0 B
+  tempo                              n=10  min=     871.9  media=    1256.9  max=    1758.9 ms
+
+  GET /auth/profile  (HTTP 200)
+  requisicao                         n=10  min=    1124.0  media=    1124.0  max=    1124.0 B
+  resposta                           n=10  min=     475.0  media=     475.0  max=     475.0 B
+  tempo                              n=10  min=     713.6  media=    1073.6  max=    1645.8 ms
+
+  GET /learning/gestures  (HTTP 200)
+  requisicao                         n=10  min=    1129.0  media=    1129.0  max=    1129.0 B
+  resposta                           n=10  min=    3075.0  media=    3075.0  max=    3075.0 B
+  tempo                              n=10  min=     684.6  media=     869.9  max=    1160.2 ms
+
+== E4  Supabase Auth (mesmas chamadas que a API faz: sign_in, refresh, get_user)
+
+  sign_in_with_password  (HTTP 200)
+  requisicao                         n=10  min=     342.0  media=     342.0  max=     342.0 B
+  resposta                           n=10  min=    3266.0  media=    3267.4  max=    3268.0 B
+  tempo                              n=10  min=     635.4  media=     842.5  max=    1998.4 ms
+
+  get_user  (HTTP 200)
+  requisicao                         n=10  min=    1212.0  media=    1212.0  max=    1212.0 B
+  resposta                           n=10  min=    2146.0  media=    2146.8  max=    2147.0 B
+  tempo                              n=10  min=     263.5  media=     535.1  max=     658.4 ms
+
+  refresh_session (1 medicao: cada refresh_token so vale 1 vez)  req=313 B  resp=3279 B
+
+== Log do app  inference-log.jsonl
+  sessoes (open_ms, close_ms, respostas):
+   1: 1794772082441 1794772131436 122
+   2: 1794772136839 1794772143648 21
+   3: 1794772154536 1794772245109 253
+   4: 1794772250308 1794772330715 125
+   5: 1794775138184 1794775193419 128
+   6: 1794778887300 1794778926920 98
+  respostas=747  tempo conectado=321.639 s  taxa=2.322 msg/s
+  coletas estaticas salvas=99 em 60.46 min -> 1.64 amostras/min (inicio_ms=1794775212308 fim_ms=1794778840176)
+  clique -> confirmacao (WS+insert+count) n=99  min=    1033.0  media=    1378.8  max=    3902.0 ms
+  csv gerado: C:\Users\carlo\Downloads\Li-Vision\API\scripts\log_res.csv
+
+valores brutos: C:\Users\carlo\Downloads\Li-Vision\API\scripts\medicoes_raw.csv

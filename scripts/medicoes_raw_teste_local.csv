@@ -1,0 +1,7 @@
+id,enlace,medida,unidade,v1,v2,v3,v4,v5,v6,v7,v8,v9,v10
+E1_up_holistic_v1,E1,mensagem enviada (payload),B,40362,40427,40361
+E2_down_holistic_v1,E2,resposta recebida (payload),B,1669,1670,1671
+E1E2_rtt_holistic_v1,E1/E2,RTT envio -> resposta,ms,3,3,3
+E1_up_hands_v1,E1,mensagem enviada (payload),B,1554,1551,1547
+E2_down_hands_v1,E2,resposta recebida (payload),B,1674,1671,1667
+E1E2_rtt_hands_v1,E1/E2,RTT envio -> resposta,ms,1,0,0
