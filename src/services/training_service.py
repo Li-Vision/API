@@ -188,12 +188,14 @@ class TrainingService:
 
             total_samples = len(df)
             holistic_dim = hf.frame_size(hf.SCHEMA_HOLISTIC_V1)
+            hands_dim = hf.frame_size(hf.SCHEMA_HANDS_V1)
 
-            if tamanhos == {holistic_dim}:
-                # Dataset holistico: a letra e' decidida pela FORMA DA MAO.
-                # Corpo, rosto e posicao na tela ficam de fora — com eles o
-                # modelo decorava quem gravou (99% no teste, 0% no B de outra
-                # pessoa). Ver src/training/static_trainer.py.
+            if tamanhos in ({holistic_dim}, {hands_dim}):
+                # Dataset holistico ou so-maos (hands_v1, 130): a letra e'
+                # decidida pela FORMA DA MAO. Corpo, rosto e posicao na tela
+                # ficam de fora — com eles o modelo decorava quem gravou (99%
+                # no teste, 0% no B de outra pessoa). A mao 1 ocupa as mesmas
+                # posicoes nos dois formatos. Ver src/training/static_trainer.py.
                 self._update_job(job_id, {"progress": 30, "stage": "preparing_model"})
                 t_fit = time.time()
                 with threadpool_limits(limits=2):
