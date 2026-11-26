@@ -111,6 +111,7 @@ class UserSession:
             cooldown_seconds=config["detection"].get("cooldown_seconds", 1.0),
             hold_seconds=config["detection"].get("hold_seconds", 0.5),
             hybrid_motion_split=config["detection"].get("hybrid_motion_split"),
+            gesture_hold_seconds=config["detection"].get("gesture_hold_seconds", 2.0),
         )
 
     def _create_static_detectors(self, config) -> list:
