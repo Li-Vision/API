@@ -6,6 +6,12 @@ from src.diagnostics import finger_crossing
 
 logger = logging.getLogger(__name__)
 
+# Classe de rejeição do modelo dinâmico: "isto não é gesto nenhum" (mão parada,
+# transição entre letras, mão entrando no quadro). Sem ela o modelo é obrigado a
+# escolher um dos gestos que conhece. Nunca vira resposta e não disputa com o
+# estático. A coleta grava o rótulo em maiúsculas.
+REJECTION_LABEL = "NADA"
+
 
 class DetectorManager:
     """
@@ -203,7 +209,9 @@ class DetectorManager:
                     entry["motion"] = round(float(motion), 5)
                 self.last_trace.append(entry)
 
-                if label:
+                if is_seq and label and str(label).strip().upper() == REJECTION_LABEL:
+                    entry["gated"] = "rejection_class"  # visivel no log do app
+                elif label:
                     candidates.append((det, label, score, is_seq, entry))
 
             except Exception as e:
