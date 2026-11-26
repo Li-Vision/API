@@ -29,6 +29,8 @@ class DetectorManager:
     cooldown_seconds = 1.0
     hold_seconds = 0.5
     hybrid_motion_split = None
+    gesture_hold_seconds = 0.0
+    gesture_until = 0.0
     _clock = staticmethod(time.monotonic)
 
     def __init__(
@@ -40,6 +42,7 @@ class DetectorManager:
         hold_seconds=0.5,
         clock=None,
         hybrid_motion_split=None,
+        gesture_hold_seconds=0.0,
     ):
         self.detectors = detectors
         self.min_score = min_score
@@ -70,11 +73,18 @@ class DetectorManager:
         self.last_label = None
         self.last_score = 0.0
 
-        # Tempo sem detecção confiável. Passando de `hold_seconds`, o último
-        # gesto é esquecido; sem isso a tela ficava presa na última letra (A/C)
-        # enquanto o modelo não alcançava o limiar de confiança.
+        # Tempo sem reler o gesto exibido. Passando de `hold_seconds`, ele é
+        # esquecido. Só uma leitura confiante do PRÓPRIO gesto renova o prazo:
+        # quando qualquer leitura renovava, letras oscilando (S, B, R...) sem
+        # se repetir 3 vezes mantinham o gesto antigo na tela indefinidamente.
         self.hold_seconds = hold_seconds
         self.last_hit = 0.0
+
+        # Tempo mínimo na tela de um gesto com movimento. A janela do dinâmico
+        # é apagada ao confirmar, então o gesto não é relido e sumiria logo
+        # após o cooldown. Uma nova confirmação substitui antes do prazo.
+        self.gesture_hold_seconds = gesture_hold_seconds
+        self.gesture_until = 0.0
 
         if clock is not None:
             self._clock = clock
@@ -95,9 +105,10 @@ class DetectorManager:
             "cross": self.last_cross,
         }
 
-    def _miss(self):
-        """Registra um frame sem detecção e devolve o gesto ainda retido."""
-        if self._clock() - self.last_hit > self.hold_seconds:
+    def _expire(self):
+        """Esquece o gesto exibido se venceu o prazo; devolve o que restar."""
+        now = self._clock()
+        if now >= self.gesture_until and now - self.last_hit > self.hold_seconds:
             self.last_label = None
             self.last_score = 0.0
         return self.last_label, self.last_score
@@ -211,9 +222,10 @@ class DetectorManager:
         # -------------------------------------------
         if best_score < self.min_score:
             self.history.clear()
-            return self._miss()
+            return self._expire()
 
-        self.last_hit = now
+        if best_label == self.last_label:
+            self.last_hit = now
 
         # -------------------------------------------
         # Estabilização temporal
@@ -221,7 +233,7 @@ class DetectorManager:
         self.history.append(best_label)
 
         if len(self.history) < self.history.maxlen:
-            return self.last_label, self.last_score
+            return self._expire()
 
         # verifica se todos frames detectaram o mesmo gesto
         if len(set(self.history)) == 1:
@@ -231,6 +243,12 @@ class DetectorManager:
             # salva como último gesto
             self.last_label = label
             self.last_score = best_score
+            # No cooldown nada é relido: o prazo do hold só começa a contar
+            # quando ele termina, para a troca de letra não piscar em branco.
+            self.last_hit = now + self.cooldown_seconds
+
+            from_sequence = best_det is not None and self._is_sequence_detector(best_det)
+            self.gesture_until = now + self.gesture_hold_seconds if from_sequence else 0.0
 
             # ativa cooldown
             self.cooldown_until = now + self.cooldown_seconds
@@ -242,14 +260,14 @@ class DetectorManager:
             # estática confirmada não diz nada sobre a janela do dinâmico, e
             # limpar aqui impedia a janela de encher no modo híbrido (o estático
             # confirma uma letra a cada ~3 frames; a janela precisa de 15).
-            if best_det is not None and self._is_sequence_detector(best_det):
+            if from_sequence:
                 for det in self.detectors:
                     if self._is_sequence_detector(det):
                         det.buffer.clear()
 
             return label, best_score
 
-        return self.last_label, self.last_score
+        return self._expire()
 
     def _pick_best(self, candidates):
         """

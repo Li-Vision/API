@@ -20,6 +20,10 @@ detection:
   # confianca. Em segundos porque o aparelho entrega ~3 frames/s.
   cooldown_seconds: 1.0
   hold_seconds: 0.5
+  # hold_seconds so' e' renovado quando o proprio gesto exibido e' lido de novo.
+  # Um gesto com movimento nao e' relido (a janela e' apagada ao confirmar),
+  # entao ganha este tempo minimo na tela, contado da confirmacao.
+  gesture_hold_seconds: 2.0
 
   # Modo hibrido: movimento da janela do dinamico (campo "motion" do log) que
   # separa pose de gesto. Acima, o dinamico tem prioridade sobre o estatico;
